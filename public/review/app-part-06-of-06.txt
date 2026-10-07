@@ -1,0 +1,2104 @@
+IQ-CAL-PLB WHOLE APP — PART 6 OF 6
+Plain text. Read this file directly. Do not unzip, download, or browse.
+This pack is the engineering website: plate buckling, bolts, units, and the pages that show them.
+Elastic plate engine IQ-PLB-E1.0. AS 4100 plate/web subset IQ-PLB-AS4100-D1.0.
+Not included: node_modules, package-lock, the copyrighted standard PDF, and the Grok preview-host login code.
+
+
+========================================================================
+FILE src/bolts/clearance.ts
+========================================================================
+
+/**
+ * ISO 273 nominal clearance holes: fine, medium, coarse.
+ * Nominal diameters only. H12 / H13 / H14 are the tolerance grades named by the standard;
+ * the limit deviations are not copied here.
+ * Sources agree on these nominals (ISO 273 as republished in workshop charts). Not a scan of the ISO PDF.
+ */
+const ISO_273: Record<number, { fine: number; medium: number; coarse: number }> = {
+  3: { fine: 3.2, medium: 3.4, coarse: 3.6 },
+  4: { fine: 4.3, medium: 4.5, coarse: 4.8 },
+  5: { fine: 5.3, medium: 5.5, coarse: 5.8 },
+  6: { fine: 6.4, medium: 6.6, coarse: 7 },
+  7: { fine: 7.4, medium: 7.6, coarse: 8 },
+  8: { fine: 8.4, medium: 9, coarse: 10 },
+  10: { fine: 10.5, medium: 11, coarse: 12 },
+  12: { fine: 13, medium: 13.5, coarse: 14.5 },
+  14: { fine: 15, medium: 15.5, coarse: 16.5 },
+  16: { fine: 17, medium: 17.5, coarse: 18.5 },
+  18: { fine: 19, medium: 20, coarse: 21 },
+  20: { fine: 21, medium: 22, coarse: 24 },
+  22: { fine: 23, medium: 24, coarse: 26 },
+  24: { fine: 25, medium: 26, coarse: 28 },
+  27: { fine: 28, medium: 30, coarse: 32 },
+  30: { fine: 31, medium: 33, coarse: 35 },
+  33: { fine: 34, medium: 36, coarse: 38 },
+  36: { fine: 37, medium: 39, coarse: 42 },
+  39: { fine: 40, medium: 42, coarse: 45 },
+  42: { fine: 43, medium: 45, coarse: 48 },
+  45: { fine: 46, medium: 48, coarse: 52 },
+  48: { fine: 50, medium: 52, coarse: 56 },
+  52: { fine: 54, medium: 56, coarse: 62 },
+  56: { fine: 58, medium: 62, coarse: 66 },
+  60: { fine: 62, medium: 66, coarse: 70 },
+  64: { fine: 66, medium: 70, coarse: 74 },
+}
+
+export const CLEARANCE_NOTE =
+  "ISO 273 nominal clearance hole for the bolt diameter. Fine is the close series, medium is the normal series, coarse is the large series. Pitch does not change the clearance hole. Tolerance limits and countersink or counterbore sizes are not in this dataset."
+
+export function clearanceHoles(dMm: number) {
+  const row = ISO_273[dMm]
+  if (!row) return null
+  return { ...row, source: "ISO 273 nominal" }
+}
+
+
+========================================================================
+FILE src/bolts/database.ts
+========================================================================
+
+import { PROPERTY_CLASSES } from "./materials.ts"
+
+export type ProvenanceKind = "calculated" | "reference-nominal" | "typical-product" | "unavailable"
+
+export type Provenance = {
+  sourceType: ProvenanceKind
+  sourceStandard: string
+  edition: string
+  clause: string
+  note: string
+}
+
+export const PROFILE_PROVENANCE: Provenance = {
+  sourceType: "calculated",
+  sourceStandard: "ISO 68-1 basic profile / ISO 898-1 stress area",
+  edition: "formula, not a table extract",
+  clause: "H = (√3/2)P; d2 = d − 3√3 P/8; d1 = d − 5√3 P/8; As = π/4 ((d2+d3)/2)²",
+  note: "Calculated from the basic 60° profile. Not a copy of ISO 724.",
+}
+
+export const CLASS_PROVENANCE: Provenance = {
+  sourceType: "reference-nominal",
+  sourceStandard: "ISO 898-1 property class system",
+  edition: "confirm current edition",
+  clause: "class designation (fu and yield ratio), with the usual 8.8 diameter split",
+  note: "Nominal minimums. Not a verbatim standard table. Do not treat fy, fu and proof stress as interchangeable.",
+}
+
+export const HEX_PROVENANCE: Provenance = {
+  sourceType: "typical-product",
+  sourceStandard: "Typical commercial ISO hexagon product",
+  edition: "not an ISO 4014/4017 extract",
+  clause: "across flats s and head height k",
+  note: "Typical product dimensions for a hexagon head. Older DIN hexagons can differ (M22 was 32 mm). Confirm before fabrication.",
+}
+
+export type MetricSize = {
+  d: number
+  coarse: number
+  fine: number[]
+  /** Typical hex across flats and head height. Omitted where not verified. */
+  hex?: { s: number; k: number }
+}
+
+const HEX: Record<number, { s: number; k: number }> = {
+  3: { s: 5.5, k: 2 },
+  4: { s: 7, k: 2.8 },
+  5: { s: 8, k: 3.5 },
+  6: { s: 10, k: 4 },
+  8: { s: 13, k: 5.3 },
+  10: { s: 16, k: 6.4 },
+  12: { s: 18, k: 7.5 },
+  14: { s: 21, k: 8.8 },
+  16: { s: 24, k: 10 },
+  18: { s: 27, k: 11.5 },
+  20: { s: 30, k: 12.5 },
+  22: { s: 34, k: 14 },
+  24: { s: 36, k: 15 },
+  27: { s: 41, k: 17 },
+  30: { s: 46, k: 18.7 },
+  33: { s: 50, k: 21 },
+  36: { s: 55, k: 22.5 },
+  42: { s: 65, k: 26 },
+  48: { s: 75, k: 30 },
+  56: { s: 85, k: 35 },
+  64: { s: 95, k: 40 },
+}
+
+const COARSE: Record<number, number> = {
+  3: 0.5, 4: 0.7, 5: 0.8, 6: 1, 7: 1, 8: 1.25, 10: 1.5, 12: 1.75, 14: 2, 16: 2,
+  18: 2.5, 20: 2.5, 22: 2.5, 24: 3, 27: 3, 30: 3.5, 33: 3.5, 36: 4, 39: 4,
+  42: 4.5, 45: 4.5, 48: 5, 52: 5, 56: 5.5, 60: 5.5, 64: 6, 68: 6, 72: 6, 80: 6, 90: 6, 100: 6,
+}
+
+const FINE: Record<number, number[]> = {
+  8: [1],
+  10: [1.25, 1],
+  12: [1.5, 1.25, 1],
+  14: [1.5],
+  16: [1.5],
+  18: [2, 1.5],
+  20: [2, 1.5],
+  22: [2, 1.5],
+  24: [2],
+  27: [2],
+  30: [3, 2],
+  33: [2],
+  36: [3],
+  39: [3],
+  42: [3],
+  48: [3],
+  56: [4],
+  64: [4],
+}
+
+export const METRIC_SIZES: MetricSize[] = Object.keys(COARSE)
+  .map(Number)
+  .sort((a, b) => a - b)
+  .map((d) => ({
+    d,
+    coarse: COARSE[d] ?? 0,
+    fine: FINE[d] ?? [],
+    hex: HEX[d],
+  }))
+
+export type UnifiedSize = {
+  label: string
+  inch: number
+  unc?: number
+  unf?: number
+  unef?: number
+}
+
+export const UNIFIED_SIZES: UnifiedSize[] = [
+  { label: "1/4", inch: 0.25, unc: 20, unf: 28 },
+  { label: "5/16", inch: 0.3125, unc: 18, unf: 24 },
+  { label: "3/8", inch: 0.375, unc: 16, unf: 24 },
+  { label: "7/16", inch: 0.4375, unc: 14, unf: 20 },
+  { label: "1/2", inch: 0.5, unc: 13, unf: 20, unef: 28 },
+  { label: "9/16", inch: 0.5625, unc: 12, unf: 18 },
+  { label: "5/8", inch: 0.625, unc: 11, unf: 18, unef: 24 },
+  { label: "3/4", inch: 0.75, unc: 10, unf: 16, unef: 20 },
+  { label: "7/8", inch: 0.875, unc: 9, unf: 14, unef: 20 },
+  { label: "1", inch: 1, unc: 8, unf: 12, unef: 20 },
+  { label: "1-1/8", inch: 1.125, unc: 7, unf: 12 },
+  { label: "1-1/4", inch: 1.25, unc: 7, unf: 12 },
+  { label: "1-1/2", inch: 1.5, unc: 6, unf: 12 },
+  { label: "1-3/4", inch: 1.75, unc: 5 },
+  { label: "2", inch: 2, unc: 4.5 },
+]
+
+export type StandardDef = {
+  id: string
+  family: string
+  name: string
+  system: "metric" | "unified"
+  series?: "unc" | "unf" | "unef"
+  classes: string[] | "all"
+  /** Millimetres, or null for every metric size. */
+  metricDiameters: number[] | null
+  minInch?: number
+  design: "as4100" | "none"
+  note: string
+}
+
+const ALL_CLASSES = PROPERTY_CLASSES.map((item) => item.id)
+const STRUCTURAL_D = [12, 16, 20, 24, 30, 36]
+const PRECISION_D = METRIC_SIZES.filter((size) => size.d <= 64).map((size) => size.d)
+const COMMERCIAL_D = METRIC_SIZES.filter((size) => size.d >= 5 && size.d <= 64).map((size) => size.d)
+
+export const STANDARDS: StandardDef[] = [
+  {
+    id: "iso-metric",
+    family: "ISO",
+    name: "ISO metric",
+    system: "metric",
+    classes: "all",
+    metricDiameters: null,
+    design: "as4100",
+    note: "ISO 4014 / 4017 / 4032 / 4762 product geometry is not embedded except typical hexagon s and k. Thread data is the calculated basic profile. Property classes are ISO 898-1 nominal minimums.",
+  },
+  {
+    id: "as1110",
+    family: "AU",
+    name: "AS/NZS 1110.1",
+    system: "metric",
+    classes: ["8.8", "10.9", "12.9"],
+    metricDiameters: PRECISION_D,
+    design: "as4100",
+    note: "Precision hexagon bolts, product grades A and B (ISO 4014 type). Usual classes 8.8, 10.9 and 12.9. Diameters here are M3 to M64. This is not a copy of the AS/NZS 1110 tables — s and k are typical hexagon sizes, and tolerances, thread length and product grade are not embedded.",
+  },
+  {
+    id: "as1111",
+    family: "AU",
+    name: "AS 1111.1",
+    system: "metric",
+    classes: ["4.6", "4.8"],
+    metricDiameters: COMMERCIAL_D,
+    design: "as4100",
+    note: "Commercial hexagon bolts, product grade C. Usual classes 4.6 and 4.8. Diameters here are M5 to M64. This is not a copy of the AS 1111 tables — s and k are typical hexagon sizes. Grade C tolerances are wider and are not embedded.",
+  },
+  {
+    id: "as1252",
+    family: "AU",
+    name: "AS/NZS 1252.1",
+    system: "metric",
+    classes: ["8.8"],
+    metricDiameters: STRUCTURAL_D,
+    design: "as4100",
+    note: "High-strength structural bolting assemblies. This dataset holds 8.8 and the usual diameter set only. Assembly marking, k-class and preload procedure are not embedded.",
+  },
+  {
+    id: "as4100",
+    family: "AU",
+    name: "AS 4100 bolting context",
+    system: "metric",
+    classes: ["4.6", "8.8", "10.9"],
+    metricDiameters: null,
+    design: "as4100",
+    note: "A design-context entry, not a product standard. 4.6, 8.8 and 10.9 only. Product bolts are AS/NZS 1110.1, AS 1111.1 or AS/NZS 1252.1. This sheet does not run a design check.",
+  },
+  {
+    id: "en14399",
+    family: "EN",
+    name: "EN 14399",
+    system: "metric",
+    classes: ["8.8", "10.9"],
+    metricDiameters: STRUCTURAL_D,
+    design: "none",
+    note: "HR/HV system geometry, nut marking and preload are not in this dataset. Metric thread geometry and ISO property class only. No EN design capacity is returned.",
+  },
+  {
+    id: "en15048",
+    family: "EN",
+    name: "EN 15048",
+    system: "metric",
+    classes: ["4.6", "8.8", "10.9"],
+    metricDiameters: null,
+    design: "none",
+    note: "Non-preloaded structural assemblies. Product requirements are not embedded. No EN design capacity is returned.",
+  },
+  {
+    id: "unc",
+    family: "ASME",
+    name: "Unified UNC",
+    system: "unified",
+    series: "unc",
+    classes: [],
+    metricDiameters: null,
+    design: "none",
+    note: "Basic Unified profile calculated from nominal diameter and TPI. SAE J429 and ASTM strength data are not in the verified dataset.",
+  },
+  {
+    id: "unf",
+    family: "ASME",
+    name: "Unified UNF",
+    system: "unified",
+    series: "unf",
+    classes: [],
+    metricDiameters: null,
+    design: "none",
+    note: "Fine Unified thread. Strength data is not in the verified dataset.",
+  },
+  {
+    id: "unef",
+    family: "ASME",
+    name: "Unified UNEF",
+    system: "unified",
+    series: "unef",
+    classes: [],
+    metricDiameters: null,
+    design: "none",
+    note: "Extra-fine Unified thread, only where a TPI is in this dataset.",
+  },
+  {
+    id: "astm-inch",
+    family: "ASTM",
+    name: "ASTM structural inch",
+    system: "unified",
+    series: "unc",
+    classes: [],
+    metricDiameters: null,
+    minInch: 0.5,
+    design: "none",
+    note: "Thread geometry for common UNC diameters from 1/2 in. F3125 (historical A325 / A490 names) strength tables are not embedded. No design capacity is returned.",
+  },
+]
+
+export function standardById(id: string): StandardDef | undefined {
+  return STANDARDS.find((item) => item.id === id)
+}
+
+export function classesFor(standard: StandardDef): string[] {
+  if (standard.classes === "all") return ALL_CLASSES
+  return standard.classes
+}
+
+export function metricSizesFor(standard: StandardDef): MetricSize[] {
+  if (standard.metricDiameters == null) return METRIC_SIZES
+  const allow = new Set(standard.metricDiameters)
+  return METRIC_SIZES.filter((size) => allow.has(size.d))
+}
+
+export function unifiedSizesFor(standard: StandardDef): UnifiedSize[] {
+  return UNIFIED_SIZES.filter((size) => {
+    const tpi = standard.series ? size[standard.series] : size.unc
+    if (tpi == null) return false
+    if (standard.minInch != null && size.inch < standard.minInch) return false
+    return true
+  })
+}
+
+export function metricLabel(d: number): string {
+  return `M${d}`
+}
+
+
+========================================================================
+FILE src/bolts/mass.ts
+========================================================================
+
+export const STEEL_DENSITY = 7850
+
+export type MassResult = {
+  boltKg: number | null
+  reason: string
+  density: number
+}
+
+/** Approximate machined volume. Head is a regular hex prism. Thread underfill is ignored. */
+export function approximateBoltMass(dMm: number, lengthMm: number, hex: { s: number; k: number } | undefined, qty: number): MassResult {
+  if (!(qty > 0) || !Number.isInteger(qty)) {
+    return { boltKg: null, reason: "Quantity must be a positive integer.", density: STEEL_DENSITY }
+  }
+  if (!(lengthMm > 0)) {
+    return { boltKg: null, reason: "Enter a bolt length to calculate mass.", density: STEEL_DENSITY }
+  }
+  if (!hex) {
+    return { boltKg: null, reason: "Head dimensions are not in the verified dataset — bolt mass is not estimated.", density: STEEL_DENSITY }
+  }
+  const shankM3 = (Math.PI / 4) * (dMm / 1000) ** 2 * (lengthMm / 1000)
+  const hexAreaM2 = (Math.sqrt(3) / 2) * (hex.s / 1000) ** 2
+  const headM3 = hexAreaM2 * (hex.k / 1000)
+  const one = (shankM3 + headM3) * STEEL_DENSITY
+  return {
+    boltKg: one * qty,
+    reason: "Approximate calculated mass at 7850 kg/m³. Shank is taken as full diameter over the whole length. Thread underfill, nut and washer are not included. Not a catalogue mass.",
+    density: STEEL_DENSITY,
+  }
+}
+
+
+========================================================================
+FILE src/bolts/materials.ts
+========================================================================
+
+export type ClassBand = { fu: number; fy: number; sp: number }
+
+export type PropertyClass = {
+  id: string
+  /** Nominal minimums at or below the split diameter, where a split exists. */
+  base: ClassBand
+  /** Applied when diameter is strictly greater than aboveD. */
+  above?: { aboveD: number } & ClassBand
+  maxD?: number
+  note: string
+}
+
+/**
+ * Nominal minimums associated with the ISO 898-1 property-class system.
+ * The 8.8 split (≤16 mm / >16 mm) is the usual published change.
+ * Confirm the current edition before design use. Not a verbatim table extract.
+ */
+export const PROPERTY_CLASSES: PropertyClass[] = [
+  { id: "4.6", base: { fu: 400, fy: 240, sp: 225 }, note: "Low-carbon. fu and 0.6 fu yield ratio are the class designation." },
+  { id: "4.8", base: { fu: 400, fy: 320, sp: 310 }, note: "fu 400 MPa. Yield ratio 0.8." },
+  { id: "5.6", base: { fu: 500, fy: 300, sp: 280 }, note: "fu 500 MPa. Yield ratio 0.6." },
+  { id: "5.8", base: { fu: 500, fy: 400, sp: 380 }, note: "fu 500 MPa. Yield ratio 0.8." },
+  { id: "6.8", base: { fu: 600, fy: 480, sp: 440 }, note: "fu 600 MPa. Yield ratio 0.8." },
+  {
+    id: "8.8",
+    base: { fu: 800, fy: 640, sp: 580 },
+    above: { aboveD: 16, fu: 830, fy: 660, sp: 600 },
+    note: "Structural default. fu is 800 MPa at d ≤ 16 mm and 830 MPa above 16 mm.",
+  },
+  { id: "9.8", base: { fu: 900, fy: 720, sp: 650 }, maxD: 16, note: "Only up to 16 mm in the usual class system." },
+  { id: "10.9", base: { fu: 1040, fy: 940, sp: 830 }, note: "fu 1040 MPa. Not interchangeable with 8.8." },
+  { id: "12.9", base: { fu: 1220, fy: 1100, sp: 970 }, note: "fu 1220 MPa. Outside the AS 4100 check implemented here." },
+]
+
+export function classById(id: string): PropertyClass | undefined {
+  return PROPERTY_CLASSES.find((item) => item.id === id)
+}
+
+export function classBand(id: string, dMm: number): ClassBand | null {
+  const item = classById(id)
+  if (!item) return null
+  if (item.maxD != null && dMm > item.maxD) return null
+  if (item.above && dMm > item.above.aboveD) {
+    return { fu: item.above.fu, fy: item.above.fy, sp: item.above.sp }
+  }
+  return item.base
+}
+
+export const STAINLESS_CLASSES = [
+  { id: "A2-50", family: "A2", rm: 500, rp: 210, common: "Often sold near 304. Not the same designation." },
+  { id: "A2-70", family: "A2", rm: 700, rp: 450, common: "Often sold near 304. Not the same designation." },
+  { id: "A2-80", family: "A2", rm: 800, rp: 600, common: "Often sold near 304. Not the same designation." },
+  { id: "A4-50", family: "A4", rm: 500, rp: 210, common: "Often sold near 316. Not the same designation." },
+  { id: "A4-70", family: "A4", rm: 700, rp: 450, common: "Often sold near 316. Not the same designation." },
+  { id: "A4-80", family: "A4", rm: 800, rp: 600, common: "Often sold near 316. Not the same designation." },
+] as const
+
+export const STAINLESS_NOTE =
+  "ISO 3506-1 austenitic fastener classes. rm is the minimum tensile strength and rp is the minimum 0.2% proof stress, in MPa. These are not carbon-steel property classes and they are not used in the AS 4100 check. Diameter limits and hardness are not embedded — 70 and 80 are not offered in every size. A2 is not every 304 product, and A4 is not every 316 product."
+
+
+========================================================================
+FILE src/bolts/model.ts
+========================================================================
+
+import { AREA_NOTE, areas } from "./areas.ts"
+import { boltCapacity, optionalNumber, type CapacityFail, type CapacityOk } from "./capacities.ts"
+import {
+  CLASS_PROVENANCE,
+  HEX_PROVENANCE,
+  PROFILE_PROVENANCE,
+  classesFor,
+  metricLabel,
+  metricSizesFor,
+  standardById,
+  unifiedSizesFor,
+  type StandardDef,
+} from "./database.ts"
+import { approximateBoltMass } from "./mass.ts"
+import { classBand, classById } from "./materials.ts"
+import { threadsPerInch } from "./threadGeometry.ts"
+import { parseBoltQuery, type BoltQuery } from "./search.ts"
+
+export type Selection = {
+  standardId: string
+  sizeLabel: string
+  pitchMm: number
+  classId: string
+}
+
+export const DEFAULT_SELECTION: Selection = {
+  standardId: "iso-metric",
+  sizeLabel: "M20",
+  pitchMm: 2.5,
+  classId: "8.8",
+}
+
+export type PitchOption = { pitchMm: number; label: string; series: string }
+
+export function pitchOptions(standard: StandardDef, sizeLabel: string): PitchOption[] {
+  if (standard.system === "metric") {
+    const size = metricSizesFor(standard).find((item) => metricLabel(item.d) === sizeLabel)
+    if (!size) return []
+    const options: PitchOption[] = [{ pitchMm: size.coarse, label: `${size.coarse} coarse`, series: "coarse" }]
+    for (const pitch of size.fine) options.push({ pitchMm: pitch, label: `${pitch} fine`, series: "fine" })
+    return options
+  }
+  const size = unifiedSizesFor(standard).find((item) => item.label === sizeLabel)
+  if (!size || !standard.series) return []
+  const tpi = size[standard.series]
+  if (tpi == null) return []
+  return [{ pitchMm: 25.4 / tpi, label: `${tpi} TPI`, series: standard.series }]
+}
+
+export function sizeLabels(standard: StandardDef): string[] {
+  if (standard.system === "metric") return metricSizesFor(standard).map((size) => metricLabel(size.d))
+  return unifiedSizesFor(standard).map((size) => size.label)
+}
+
+export function classOptions(standard: StandardDef, dMm: number): string[] {
+  return classesFor(standard).filter((id) => classBand(id, dMm) != null)
+}
+
+function diameterOf(standard: StandardDef, sizeLabel: string): number | null {
+  if (standard.system === "metric") {
+    const size = metricSizesFor(standard).find((item) => metricLabel(item.d) === sizeLabel)
+    return size?.d ?? null
+  }
+  const size = unifiedSizesFor(standard).find((item) => item.label === sizeLabel)
+  return size ? size.inch * 25.4 : null
+}
+
+export function clampSelection(partial: Selection): Selection | { error: string } {
+  const standard = standardById(partial.standardId)
+  if (!standard) return { error: "This combination is not contained in the current verified dataset." }
+  const labels = sizeLabels(standard)
+  const sizeLabel = labels.includes(partial.sizeLabel) ? partial.sizeLabel : labels[0]
+  if (!sizeLabel) return { error: "This combination is not contained in the current verified dataset." }
+  const pitches = pitchOptions(standard, sizeLabel)
+  const pitch = pitches.find((item) => Math.abs(item.pitchMm - partial.pitchMm) < 1e-6) ?? pitches[0]
+  if (!pitch) return { error: "This combination is not contained in the current verified dataset." }
+  const d = diameterOf(standard, sizeLabel)
+  if (d == null) return { error: "This combination is not contained in the current verified dataset." }
+  const classes = classOptions(standard, d)
+  const classId = classes.includes(partial.classId) ? partial.classId : (classes[0] ?? "")
+  return { standardId: standard.id, sizeLabel, pitchMm: pitch.pitchMm, classId }
+}
+
+export function selectionFromQuery(query: BoltQuery, fallback: Selection = DEFAULT_SELECTION): Selection | { error: string } {
+  if (!query.matched) return { error: "No bolt matched that search." }
+  const standardId = query.standardId ?? fallback.standardId
+  const standard = standardById(standardId)
+  if (!standard) return { error: "This combination is not contained in the current verified dataset." }
+  if (query.system && query.system !== standard.system && query.standardId == null) {
+    return { error: "This combination is not contained in the current verified dataset." }
+  }
+  return clampSelection({
+    standardId,
+    sizeLabel: query.sizeLabel ?? fallback.sizeLabel,
+    pitchMm: query.pitchMm ?? fallback.pitchMm,
+    classId: query.classId ?? fallback.classId,
+  })
+}
+
+export function selectionFromSlug(slug: string): Selection | { error: string } {
+  const text = decodeURIComponent(slug).replace(/-/g, " ")
+  return selectionFromQuery(parseBoltQuery(text))
+}
+
+export type SheetInput = Selection & {
+  lengthMm: string
+  threadedMm: string
+  nn: string
+  nx: string
+  lj: string
+  nStar: string
+  vStar: string
+  tp: string
+  fup: string
+  ae: string
+  qty: string
+}
+
+export type Sheet = {
+  error: string | null
+  title: string
+  subtitle: string
+  standardName: string
+  standardNote: string
+  dMm: number
+  pitchMm: number
+  series: string
+  designation: string
+  profile: ReturnType<typeof areas> | null
+  tpi: number | null
+  band: { fu: number; fy: number; sp: number } | null
+  classNote: string | null
+  hex: { s: number; k: number; e: number } | null
+  holeNote: string | null
+  holeMm: number | null
+  capacity: CapacityOk | CapacityFail | null
+  massKg: number | null
+  massEachG: number | null
+  massNote: string
+  gripMm: number | null
+  gripNote: string
+  areaNote: string
+  profileProvenance: typeof PROFILE_PROVENANCE
+  classProvenance: typeof CLASS_PROVENANCE
+  hexProvenance: typeof HEX_PROVENANCE
+}
+
+function readOptional(raw: string, label: string): { value: number | null; error: string | null } {
+  try {
+    const value = optionalNumber(raw)
+    return { value, error: null }
+  } catch (error) {
+    return { value: null, error: error instanceof Error ? `${label}: ${error.message}` : `${label} is invalid.` }
+  }
+}
+
+export function buildSheet(input: SheetInput): Sheet {
+  const standard = standardById(input.standardId)
+  const empty: Sheet = {
+    error: "This combination is not contained in the current verified dataset.",
+    title: "—",
+    subtitle: "",
+    standardName: standard?.name ?? "—",
+    standardNote: standard?.note ?? "",
+    dMm: 0,
+    pitchMm: 0,
+    series: "",
+    designation: "—",
+    profile: null,
+    tpi: null,
+    band: null,
+    classNote: null,
+    hex: null,
+    holeNote: null,
+    holeMm: null,
+    capacity: null,
+    massKg: null,
+    massEachG: null,
+    massNote: "",
+    gripMm: null,
+    gripNote: "",
+    areaNote: AREA_NOTE,
+    profileProvenance: PROFILE_PROVENANCE,
+    classProvenance: CLASS_PROVENANCE,
+    hexProvenance: HEX_PROVENANCE,
+  }
+  if (!standard) return empty
+  const dMm = diameterOf(standard, input.sizeLabel)
+  const pitches = pitchOptions(standard, input.sizeLabel)
+  const pitch = pitches.find((item) => Math.abs(item.pitchMm - input.pitchMm) < 1e-6)
+  if (dMm == null || !pitch) return empty
+  let profile
+  try {
+    profile = areas(dMm, pitch.pitchMm)
+  } catch (error) {
+    return { ...empty, error: error instanceof Error ? error.message : "Invalid geometry." }
+  }
+  const band = input.classId ? classBand(input.classId, dMm) : null
+  const cls = classById(input.classId)
+  const metricSize = standard.system === "metric"
+    ? metricSizesFor(standard).find((item) => metricLabel(item.d) === input.sizeLabel)
+    : undefined
+  const hex = metricSize?.hex
+    ? { ...metricSize.hex, e: metricSize.hex.s / Math.cos(Math.PI / 6) }
+    : null
+  const classLabel = band ? input.classId : ""
+  const designation = standard.system === "metric"
+    ? `${input.sizeLabel} × ${trimPitch(pitch.pitchMm)}${classLabel ? ` — ${classLabel}` : ""}`
+    : `${input.sizeLabel}-${standard.series ? unifiedTpi(standard, input.sizeLabel) : ""} ${standard.series?.toUpperCase() ?? ""}`
+  const hole = standard.system === "metric"
+    ? { holeMm: dMm + (dMm <= 24 ? 2 : 3), holeNote: "Indicative fabrication allowance only — not an AS 4100 table extract. Commonly d+2 mm up to 24 mm and d+3 mm above. Confirm the hole table before a drawing. Oversize and slot are not in this dataset." }
+    : { holeMm: null, holeNote: "Inch clearance holes are not in the verified dataset." }
+
+  const length = readOptional(input.lengthMm, "Length")
+  const threaded = readOptional(input.threadedMm, "Threaded length")
+  const nn = readOptional(input.nn, "nn")
+  const nx = readOptional(input.nx, "nx")
+  const lj = readOptional(input.lj, "lj")
+  const nStar = readOptional(input.nStar, "N*")
+  const vStar = readOptional(input.vStar, "V*")
+  const tp = readOptional(input.tp, "tp")
+  const fup = readOptional(input.fup, "fup")
+  const ae = readOptional(input.ae, "ae")
+  const qty = readOptional(input.qty, "Quantity")
+  const fieldError = [length, threaded, nn, nx, lj, nStar, vStar, tp, fup, ae, qty].find((item) => item.error)?.error ?? null
+
+  let gripMm: number | null = null
+  let gripNote = "Threaded length b is tabulated by the product standard for each nominal length and is not embedded. Enter b to subtract it from L."
+  if (length.value != null && threaded.value != null) {
+    if (threaded.value > length.value) {
+      gripNote = "Threaded length cannot exceed bolt length."
+    } else if (!(length.value > 0) || !(threaded.value >= 0)) {
+      gripNote = "Length must be greater than zero."
+    } else {
+      gripMm = length.value - threaded.value
+      gripNote = "Calculated grip = L − b. b is an entered value, not a standard table."
+    }
+  }
+
+  let capacity: CapacityOk | CapacityFail | null = null
+  if (!fieldError && band && (nn.value != null || input.nn.trim() === "")) {
+    const nnN = nn.value ?? 1
+    const nxN = nx.value ?? 0
+    try {
+      capacity = boltCapacity({
+        dMm,
+        pitchMm: pitch.pitchMm,
+        classId: input.classId,
+        allowDesign: standard.design === "as4100" && !!band,
+        nn: nnN,
+        nx: nxN,
+        ljMm: lj.value,
+        nStar_kN: nStar.value,
+        vStar_kN: vStar.value,
+        tpMm: tp.value,
+        fupMPa: fup.value,
+        aeMm: ae.value,
+      })
+    } catch (error) {
+      capacity = { ok: false, reason: error instanceof Error ? error.message : "Capacity failed." }
+    }
+  } else if (!band) {
+    capacity = { ok: false, reason: "Required standard data unavailable. Property class is not in this dataset for the selected standard." }
+  }
+
+  let massKg: number | null = null
+  let massEachG: number | null = null
+  let massNote = "Nut and washer mass are not calculated — those dimensions are not in the verified dataset."
+  if (length.error) massNote = length.error
+  else if (qty.error) massNote = qty.error
+  else {
+    const mass = approximateBoltMass(dMm, length.value ?? 0, hex ?? undefined, qty.value == null ? 1 : qty.value)
+    massKg = mass.boltKg
+    massEachG = mass.boltKg != null && qty.value ? (mass.boltKg / qty.value) * 1000 : mass.boltKg != null ? mass.boltKg * 1000 : null
+    massNote = mass.reason
+  }
+
+  return {
+    error: fieldError,
+    title: designation,
+    subtitle: pitch.series,
+    standardName: standard.name,
+    standardNote: standard.note,
+    dMm,
+    pitchMm: pitch.pitchMm,
+    series: pitch.series,
+    designation,
+    profile,
+    tpi: threadsPerInch(pitch.pitchMm),
+    band,
+    classNote: cls?.note ?? null,
+    hex,
+    holeMm: hole.holeMm,
+    holeNote: hole.holeNote,
+    capacity,
+    massKg,
+    massEachG,
+    massNote,
+    gripMm,
+    gripNote,
+    areaNote: AREA_NOTE,
+    profileProvenance: PROFILE_PROVENANCE,
+    classProvenance: CLASS_PROVENANCE,
+    hexProvenance: HEX_PROVENANCE,
+  }
+}
+
+function trimPitch(pitch: number): string {
+  return String(Math.round(pitch * 1000) / 1000)
+}
+
+function unifiedTpi(standard: StandardDef, sizeLabel: string): number | null {
+  const size = unifiedSizesFor(standard).find((item) => item.label === sizeLabel)
+  if (!size || !standard.series) return null
+  return size[standard.series] ?? null
+}
+
+export function shareSlug(selection: Selection): string {
+  const standard = standardById(selection.standardId)
+  const coarse = standard?.system === "metric"
+    ? metricSizesFor(standard).find((item) => metricLabel(item.d) === selection.sizeLabel)?.coarse
+    : undefined
+  const pitchPart = coarse != null && Math.abs(coarse - selection.pitchMm) < 1e-6 ? "" : `x${trimPitch(selection.pitchMm)}`
+  const cls = selection.classId ? `-${selection.classId}` : ""
+  return `${selection.sizeLabel}${pitchPart}${cls}`
+}
+
+
+========================================================================
+FILE src/bolts/pipeThreads.ts
+========================================================================
+
+export type PipeFamily = "NPT" | "BSPT" | "BSPP"
+
+export type PipeThread = {
+  id: string
+  family: PipeFamily
+  nominal: string
+  tpi: number
+  angleDeg: number
+  tapered: boolean
+  taper: string
+  externalName: string
+  internalName: string
+  seal: string
+  standard: string
+}
+
+const BSP_TPI: { nominal: string; tpi: number }[] = [
+  { nominal: "1/8", tpi: 28 },
+  { nominal: "1/4", tpi: 19 },
+  { nominal: "3/8", tpi: 19 },
+  { nominal: "1/2", tpi: 14 },
+  { nominal: "3/4", tpi: 14 },
+  { nominal: "1", tpi: 11 },
+  { nominal: "1-1/4", tpi: 11 },
+  { nominal: "1-1/2", tpi: 11 },
+  { nominal: "2", tpi: 11 },
+]
+
+const NPT_TPI: { nominal: string; tpi: number }[] = [
+  { nominal: "1/8", tpi: 27 },
+  { nominal: "1/4", tpi: 18 },
+  { nominal: "3/8", tpi: 18 },
+  { nominal: "1/2", tpi: 14 },
+  { nominal: "3/4", tpi: 14 },
+  { nominal: "1", tpi: 11.5 },
+  { nominal: "1-1/4", tpi: 11.5 },
+  { nominal: "1-1/2", tpi: 11.5 },
+  { nominal: "2", tpi: 11.5 },
+]
+
+function bsp(family: "BSPT" | "BSPP"): PipeThread[] {
+  const tapered = family === "BSPT"
+  return BSP_TPI.map((row) => ({
+    id: `${family}-${row.nominal}`,
+    family,
+    nominal: row.nominal,
+    tpi: row.tpi,
+    angleDeg: 55,
+    tapered,
+    taper: tapered ? "1:16 on diameter" : "parallel — no taper",
+    externalName: tapered ? "R" : "G",
+    internalName: tapered ? "Rc taper, or Rp if the internal thread is parallel" : "G",
+    seal: tapered ? "On the threads, usually with sealant" : "Not on the threads. A washer, O-ring or face seal",
+    standard: tapered ? "ISO 7-1" : "ISO 228-1",
+  }))
+}
+
+export const PIPE_THREADS: PipeThread[] = [
+  ...NPT_TPI.map((row) => ({
+    id: `NPT-${row.nominal}`,
+    family: "NPT" as const,
+    nominal: row.nominal,
+    tpi: row.tpi,
+    angleDeg: 60,
+    tapered: true,
+    taper: "1:16 on diameter",
+    externalName: "NPT external",
+    internalName: "NPT internal",
+    seal: "On the threads, usually with sealant",
+    standard: "ASME B1.20.1",
+  })),
+  ...bsp("BSPT"),
+  ...bsp("BSPP"),
+]
+
+export const PIPE_WARNING =
+  "NPT, BSPT and BSPP are not the same thread. A matching nominal size is not enough. NPT is 60° and tapered. BSPT is 55° and tapered. BSPP (G) is 55° and parallel and does not seal on the thread. Gauge-plane diameters and pipe tap drills are not in this dataset."
+
+
+========================================================================
+FILE src/bolts/search.ts
+========================================================================
+
+import { METRIC_SIZES, UNIFIED_SIZES, metricLabel } from "./database.ts"
+
+export type BoltQuery = {
+  matched: boolean
+  system?: "metric" | "unified"
+  series?: "coarse" | "fine" | "unc" | "unf" | "unef"
+  sizeLabel?: string
+  pitchMm?: number
+  classId?: string
+  standardId?: string
+  focus?: "areas" | "material" | "thread" | "mass" | "capacity" | "geometry"
+}
+
+const CLASSES = ["12.9", "10.9", "9.8", "8.8", "6.8", "5.8", "5.6", "4.8", "4.6"]
+
+export function parseBoltQuery(raw: string): BoltQuery {
+  const text = raw.trim()
+  if (!text) return { matched: false }
+  const lower = text.toLowerCase()
+  let standardId: string | undefined
+  if (/as\s*\/?\s*nzs\s*1252|as\s*1252|\b1252\b/.test(lower)) standardId = "as1252"
+  else if (/1111/.test(lower)) standardId = "as1111"
+  else if (/1110/.test(lower)) standardId = "as1110"
+  else if (/as\s*4100|\b4100\b/.test(lower)) standardId = "as4100"
+  else if (/14399/.test(lower)) standardId = "en14399"
+  else if (/15048/.test(lower)) standardId = "en15048"
+  else if (/astm|a325|a490|f3125/.test(lower)) standardId = "astm-inch"
+
+  let focus: BoltQuery["focus"]
+  if (/\b(stress area|root area|tensile area|areas)\b/.test(lower)) focus = "areas"
+  if (/proof|fy|fu|property|class/.test(lower)) focus = "material"
+  if (/mass|weight/.test(lower)) focus = "mass"
+  if (/capacit|shear|tension/.test(lower)) focus = "capacity"
+  if (/pitch|thread|tpi/.test(lower)) focus = "thread"
+  if (/head|across flat|geometry/.test(lower)) focus = "geometry"
+
+  const classId = CLASSES.find((id) => lower.includes(id))
+
+  const metric = text.match(/M\s*(\d+(?:\.\d+)?)\s*(?:[x×]\s*(\d+(?:\.\d+)?))?/i)
+  if (metric) {
+    const d = Number(metric[1])
+    const size = METRIC_SIZES.find((item) => item.d === d)
+    if (!size) return { matched: false }
+    const wantsFine = /fine/.test(lower)
+    const explicit = metric[2] ? Number(metric[2]) : undefined
+    let pitch = explicit
+    let series: BoltQuery["series"] = wantsFine ? "fine" : "coarse"
+    if (pitch == null && wantsFine) pitch = size.fine[0]
+    if (pitch == null) pitch = size.coarse
+    if (explicit != null && explicit !== size.coarse) series = "fine"
+    return {
+      matched: true,
+      system: "metric",
+      series,
+      sizeLabel: metricLabel(d),
+      pitchMm: pitch,
+      classId,
+      standardId: standardId ?? "iso-metric",
+      focus,
+    }
+  }
+
+  const unified = text.match(/(\d+\s*-\s*\d+\/\d+|\d+\/\d+|\d+(?:\.\d+)?)\s*(?:-| )?(\d+(?:\.\d+)?)?\s*(UNC|UNF|UNEF)/i)
+  if (unified) {
+    const label = (unified[1] ?? "").replace(/\s/g, "")
+    const size = UNIFIED_SIZES.find((item) => item.label.toLowerCase() === label.toLowerCase() || String(item.inch) === label)
+    const series = (unified[3] ?? "UNC").toLowerCase() as "unc" | "unf" | "unef"
+    if (!size || size[series] == null) return { matched: false }
+    const tpi = unified[2] ? Number(unified[2]) : size[series]
+    if (tpi !== size[series]) return { matched: false }
+    return {
+      matched: true,
+      system: "unified",
+      series,
+      sizeLabel: size.label,
+      pitchMm: 25.4 / tpi,
+      standardId: standardId ?? series,
+      focus,
+    }
+  }
+
+  if (standardId && /bolt|fastener|thread/.test(lower)) {
+    return { matched: true, standardId, focus }
+  }
+  return { matched: false }
+}
+
+export function boltSlug(sizeLabel: string, pitchMm: number, coarse: boolean, classId: string | null): string {
+  const pitch = coarse ? "" : `x${String(pitchMm).replace(".", "p")}`
+  const cls = classId ? `-${classId.replace(".", "p")}` : ""
+  return `${sizeLabel}${pitch}${cls}`
+}
+
+
+========================================================================
+FILE src/bolts/tap.ts
+========================================================================
+
+import { threadProfile } from "./threadGeometry.ts"
+
+/** Fraction of the ISO 68-1 major-to-basic-minor height. 1 is the basic minor diameter. */
+export function tapDrill(dMm: number, pitchMm: number, percent: number) {
+  if (!(percent > 0) || percent > 100) throw new Error("Thread percentage must be between 0 and 100.")
+  const profile = threadProfile(dMm, pitchMm)
+  const full = profile.d - profile.d1
+  const drill = profile.d - (percent / 100) * full
+  return {
+    drillMm: drill,
+    basicMinorMm: profile.d1,
+    shopEstimateMm: profile.d - profile.P,
+    percent,
+    note: "Calculated from the basic profile. Percent is the fraction of (d − d1), not a US percentage-of-thread chart and not a stock-drill list. d − P is the common shop estimate, shown separately.",
+  }
+}
+
+/**
+ * Length of engagement that balances bolt tension against internal-thread shear.
+ * Shear area taken as 0.5 π d Le. Shear strength taken as 0.5 × fu of the tapped part.
+ * Calculated estimate. Not a standard minimum.
+ */
+export function engagementLength(asMm2: number, dMm: number, fuBolt: number, fuInternal: number) {
+  if (!(asMm2 > 0) || !(dMm > 0) || !(fuBolt > 0) || !(fuInternal > 0)) {
+    throw new Error("Engagement needs a positive area, diameter and both strengths.")
+  }
+  const length = (4 * asMm2 * fuBolt) / (Math.PI * dMm * fuInternal)
+  return {
+    lengthMm: length,
+    ruleOfThumbMm: dMm,
+    note: "Calculated for equal strength on the assumptions above. A shop rule of thumb is about one diameter in steel into steel. Neither replaces the tapped-part standard.",
+  }
+}
+
+export function drawingCallout(dMm: number, pitchMm: number, mediumHole: number | null) {
+  const size = `${trim(dMm)} × ${trim(pitchMm)}`
+  return {
+    external: `M${size} — 6g`,
+    internal: `M${size} — 6H`,
+    clearance: mediumHole == null ? null : `Ø${trim(mediumHole)} THRU`,
+    note: "6g and 6H are the usual ISO 965 general-purpose classes. Limit deviations are not calculated. The hole line is a plain diameter note, not a company drafting standard. Coarse threads may also be written without the pitch; the pitch is kept here so a fine thread is not lost.",
+  }
+}
+
+function trim(n: number) {
+  return String(Math.round(n * 1000) / 1000)
+}
+
+
+========================================================================
+FILE src/bolts/threadGeometry.ts
+========================================================================
+
+const SQRT3 = Math.sqrt(3)
+
+export type ThreadProfile = {
+  d: number
+  P: number
+  /** Fundamental triangle height, H = (√3/2) P */
+  H: number
+  /** Basic pitch diameter. */
+  d2: number
+  /** Basic minor diameter. */
+  d1: number
+  /** d3 = d1 − H/6, used with d2 for tensile stress area. */
+  d3: number
+  /** External thread depth, 5H/8. */
+  depth: number
+  /** Nominal shank area, πd²/4. */
+  Ao: number
+  /** Tensile stress area, π/4 × ((d2+d3)/2)². */
+  As: number
+  /** Basic minor (root) area, πd1²/4. */
+  Ar: number
+  angleDeg: number
+}
+
+/**
+ * ISO 68-1 basic 60° profile and the ISO 898-1 tensile stress area.
+ * Calculated. Not a copy of the ISO 724 size table.
+ */
+export function threadProfile(d: number, P: number): ThreadProfile {
+  if (!(d > 0)) throw new Error("Bolt diameter must be greater than zero.")
+  if (!(P > 0)) throw new Error("Pitch must be greater than zero.")
+  const H = (SQRT3 / 2) * P
+  const d2 = d - (3 / 8) * SQRT3 * P
+  const d1 = d - (5 / 8) * SQRT3 * P
+  const d3 = d1 - H / 6
+  const dm = (d2 + d3) / 2
+  const area = (dia: number) => (Math.PI / 4) * dia * dia
+  return {
+    d,
+    P,
+    H,
+    d2,
+    d1,
+    d3,
+    depth: (5 / 8) * H,
+    Ao: area(d),
+    As: area(dm),
+    Ar: area(d1),
+    angleDeg: 60,
+  }
+}
+
+export function threadsPerMm(P: number): number {
+  return 1 / P
+}
+
+export function threadsPerInch(Pmm: number): number {
+  return 25.4 / Pmm
+}
+
+
+========================================================================
+FILE src/bolts/torque.ts
+========================================================================
+
+export type FrictionPreset = {
+  id: string
+  label: string
+  /** Typical nut factor. Null means the user must type it. */
+  k: number | null
+  note: string
+}
+
+/** Order-of-magnitude nut factors. Not a test of a coating or a lubricant brand. */
+export const FRICTION_PRESETS: FrictionPreset[] = [
+  { id: "dry", label: "Dry / as-received", k: 0.2, note: "Textbook dry or as-received order of magnitude." },
+  { id: "oiled", label: "Lightly oiled", k: 0.18, note: "Textbook light-oil order of magnitude." },
+  { id: "machine-oil", label: "Machine oil", k: 0.15, note: "Textbook oiled order of magnitude." },
+  { id: "antiseize", label: "Anti-seize", k: 0.12, note: "Often lower. Brand data governs." },
+  { id: "moly", label: "Molybdenum lubricant", k: 0.12, note: "Often lower. Do not reuse a dry K." },
+  { id: "zinc", label: "Zinc plated", k: 0.2, note: "Plating alone is not a lubricant specification." },
+  { id: "hdg", label: "Hot-dip galvanised", k: 0.25, note: "Often higher, and over-tapping of the nut matters." },
+  { id: "ss-dry", label: "Stainless, dry", k: 0.3, note: "Galling risk. A dry stainless K is a poor installation plan." },
+  { id: "ss-lube", label: "Stainless, lubricated", k: 0.16, note: "Still an estimate. Use the lubricant maker's data." },
+  { id: "user", label: "User-defined", k: null, note: "No coefficient is assumed." },
+]
+
+export const TORQUE_WARNING =
+  "This is an estimated preload from torque, not a verified bolt tension. Friction takes most of the torque. Coating, lubricant, finish, reuse, the nut and the washer can move the result by a large amount. For a controlled joint, use the manufacturer or a tested procedure."
+
+export type TorqueInput = {
+  dMm: number
+  pitchMm: number
+  d2Mm: number
+  asMm2: number
+  basisMPa: number
+  basisName: string
+  percent: number | null
+  manualKn: number | null
+  k: number | null
+  torqueNm: number | null
+  muThread: number | null
+  muBearing: number | null
+  bearingOdMm: number | null
+  bearingIdMm: number | null
+}
+
+export type TorqueStep = { label: string; equation: string; substitution: string; result: string }
+
+export type TorqueOk = {
+  ok: true
+  proofKn: number
+  fromPercentKn: number | null
+  fromTorqueKn: number | null
+  torqueFromPreloadNm: number | null
+  percentOfProof: number | null
+  threadNm: number | null
+  bearingNm: number | null
+  advancedNm: number | null
+  kFromAdvanced: number | null
+  steps: TorqueStep[]
+}
+
+export type TorqueFail = { ok: false; reason: string }
+
+function finite(n: number | null): n is number {
+  return n != null && Number.isFinite(n)
+}
+
+export function boltTorque(input: TorqueInput): TorqueOk | TorqueFail {
+  if (!(input.dMm > 0) || !(input.pitchMm > 0) || !(input.d2Mm > 0) || !(input.asMm2 > 0)) {
+    return { ok: false, reason: "Diameter, pitch and stress area are required." }
+  }
+  if (!(input.basisMPa > 0)) return { ok: false, reason: "No proof or yield-related stress is available for this bolt." }
+  if (input.percent != null && (!(input.percent > 0) || input.percent > 100)) {
+    return { ok: false, reason: "Preload percentage must be greater than 0 and at most 100." }
+  }
+  if (input.k != null && !(input.k > 0)) return { ok: false, reason: "Nut factor K must be greater than zero." }
+  if (input.manualKn != null && !(input.manualKn > 0)) return { ok: false, reason: "Target preload must be greater than zero." }
+  if (input.torqueNm != null && !(input.torqueNm > 0)) return { ok: false, reason: "Torque must be greater than zero." }
+
+  const proofN = input.basisMPa * input.asMm2
+  const proofKn = proofN / 1000
+  const steps: TorqueStep[] = [
+    {
+      label: input.basisName,
+      equation: "Proof or reference load = stress × As",
+      substitution: `${input.basisMPa} MPa × ${input.asMm2.toFixed(2)} mm²`,
+      result: `${proofKn.toFixed(2)} kN`,
+    },
+  ]
+
+  const fromPercentKn = input.percent == null ? null : (input.percent / 100) * proofKn
+  if (fromPercentKn != null && input.percent != null) {
+    steps.push({
+      label: "Target from percent",
+      equation: "F = (percent / 100) × proof load",
+      substitution: `${input.percent}% × ${proofKn.toFixed(2)} kN`,
+      result: `${fromPercentKn.toFixed(2)} kN`,
+    })
+  }
+
+  const targetKn = input.manualKn ?? fromPercentKn
+  let torqueFromPreloadNm: number | null = null
+  if (targetKn != null && finite(input.k)) {
+    const forceN = targetKn * 1000
+    torqueFromPreloadNm = (input.k * forceN * input.dMm) / 1000
+    steps.push({
+      label: "T from preload",
+      equation: "T = K × F × d",
+      substitution: `${input.k} × ${forceN.toFixed(0)} N × ${input.dMm} mm / 1000`,
+      result: `${torqueFromPreloadNm.toFixed(2)} N·m`,
+    })
+  }
+
+  let fromTorqueKn: number | null = null
+  if (finite(input.torqueNm) && finite(input.k)) {
+    const forceN = (input.torqueNm * 1000) / (input.k * input.dMm)
+    fromTorqueKn = forceN / 1000
+    steps.push({
+      label: "F from torque",
+      equation: "F = T / (K × d)",
+      substitution: `${input.torqueNm} N·m / (${input.k} × ${input.dMm} mm)`,
+      result: `${fromTorqueKn.toFixed(2)} kN`,
+    })
+  }
+
+  const referenceKn = input.manualKn ?? fromPercentKn ?? fromTorqueKn
+  const percentOfProof = referenceKn == null ? null : (referenceKn / proofKn) * 100
+
+  let threadNm: number | null = null
+  let bearingNm: number | null = null
+  let advancedNm: number | null = null
+  let kFromAdvanced: number | null = null
+  const advancedAsked = input.muThread != null || input.muBearing != null || input.bearingOdMm != null || input.bearingIdMm != null
+  if (advancedAsked) {
+    if (!finite(input.muThread) || !finite(input.muBearing) || !(input.muThread > 0) || !(input.muBearing > 0) || input.muThread >= 1 || input.muBearing >= 1) {
+      return { ok: false, reason: "Thread and bearing friction must each be greater than 0 and less than 1." }
+    }
+    if (!finite(input.bearingOdMm) || !finite(input.bearingIdMm) || !(input.bearingOdMm > input.bearingIdMm)) {
+      return { ok: false, reason: "Bearing outside diameter must be greater than the inside diameter. Nothing is assumed for the washer." }
+    }
+    if (referenceKn == null) return { ok: false, reason: "The split torque needs a target preload first." }
+    const forceN = referenceKn * 1000
+    const lambda = Math.atan(input.pitchMm / (Math.PI * input.d2Mm))
+    const rho = Math.atan(input.muThread / Math.cos(Math.PI / 6))
+    threadNm = (forceN * (input.d2Mm / 2) * Math.tan(lambda + rho)) / 1000
+    bearingNm = (forceN * input.muBearing * ((input.bearingOdMm + input.bearingIdMm) / 4)) / 1000
+    advancedNm = threadNm + bearingNm
+    kFromAdvanced = advancedNm / (forceN * input.dMm / 1000)
+    steps.push(
+      {
+        label: "Thread torque",
+        equation: "T_thread = F × (d2/2) × tan(λ + ρ′), tan λ = P/(π d2), tan ρ′ = μ_th/cos 30°",
+        substitution: `F = ${forceN.toFixed(0)} N, d2 = ${input.d2Mm.toFixed(3)} mm, μ_th = ${input.muThread}`,
+        result: `${threadNm.toFixed(2)} N·m`,
+      },
+      {
+        label: "Bearing torque",
+        equation: "T_bearing = F × μ_b × (OD + ID) / 4",
+        substitution: `μ_b = ${input.muBearing}, OD = ${input.bearingOdMm} mm, ID = ${input.bearingIdMm} mm`,
+        result: `${bearingNm.toFixed(2)} N·m`,
+      },
+    )
+  }
+
+  return {
+    ok: true,
+    proofKn,
+    fromPercentKn,
+    fromTorqueKn,
+    torqueFromPreloadNm,
+    percentOfProof,
+    threadNm,
+    bearingNm,
+    advancedNm,
+    kFromAdvanced,
+    steps,
+  }
+}
+
+
+========================================================================
+FILE src/units/converter.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import test from "node:test"
+import { convert } from "./converter.ts"
+import { lookupAlias } from "./definitions.ts"
+import { parseQuantity } from "./parser.ts"
+
+test("1 in = 25.4 mm", () => {
+  assert.equal(convert(1, "in", "mm"), 25.4)
+})
+
+test("1 MPa = 1 N/mm²", () => {
+  assert.equal(convert(1, "pressure:MPa", "pressure:N/mm2"), 1)
+})
+
+test("1 kN/m = 1 N/mm", () => {
+  assert.equal(convert(1, "kN/m", "N/mm"), 1)
+})
+
+test("1 m⁴ = 1e12 mm⁴", () => {
+  assert.equal(convert(1, "m4", "mm4"), 1e12)
+})
+
+test("60 rpm = 2π rad/s", () => {
+  assert.ok(Math.abs(convert(60, "rpm", "rad/s") - 2 * Math.PI) < 1e-12)
+})
+
+test("temperature offsets", () => {
+  assert.ok(Math.abs(convert(0, "C", "F") - 32) < 1e-9)
+  assert.ok(Math.abs(convert(100, "C", "F") - 212) < 1e-9)
+  assert.ok(Math.abs(convert(0, "C", "K") - 273.15) < 1e-9)
+})
+
+test("1 cSt = 1 mm²/s", () => {
+  assert.equal(convert(1, "cSt", "mm2/s"), 1)
+})
+
+test("force cannot become stress", () => {
+  assert.throws(() => convert(1, "kN", "pressure:MPa"), /Force cannot be directly converted to Stress/)
+})
+
+test("mass cannot become force", () => {
+  assert.throws(() => convert(1, "kg", "N"), /Mass and force/)
+})
+
+test("volume is not section modulus", () => {
+  assert.throws(() => convert(1, "mm3", "mm3-s"), /different engineering quantities/)
+})
+
+test("absolute temperature below 0 K", () => {
+  assert.throws(() => convert(-300, "C", "K"), /0 K/)
+})
+
+test("parser reads an engineering quantity", () => {
+  const parsed = parseQuantity("350 MPa to psi")
+  assert.ok(parsed)
+  assert.equal(parsed?.value, 350)
+  assert.equal(parsed?.unit.id, "pressure:MPa")
+  assert.equal(parsed?.to?.id, "psi")
+  assert.equal(lookupAlias("kg/m3")?.id, "kg/m3")
+})
+
+
+========================================================================
+FILE src/units/converter.ts
+========================================================================
+
+import { sameDim } from "./dimensions.ts"
+import { categoryById, unitById, type UnitDef } from "./definitions.ts"
+
+export class ConvertError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ConvertError"
+  }
+}
+
+export function quantityName(unit: UnitDef): string {
+  return categoryById(unit.category)?.label ?? unit.kind
+}
+
+export function incompatibility(from: UnitDef, to: UnitDef): string | null {
+  if (from.id === to.id) return null
+  if (from.kind === to.kind && sameDim(from.dim, to.dim)) return null
+  if (sameDim(from.dim, to.dim) && from.kind !== to.kind) {
+    return `Same base dimension but different engineering quantities: ${quantityName(from)} cannot be converted to ${quantityName(to)}.`
+  }
+  if (from.kind === "mass" && to.kind === "force") {
+    return "Mass and force are different quantities. Converting mass to weight requires gravitational acceleration."
+  }
+  if (from.kind === "force" && to.kind === "mass") {
+    return "Force and mass are different quantities. Converting weight to mass requires gravitational acceleration."
+  }
+  if (
+    (from.kind === "force" && to.kind === "stress") ||
+    (from.kind === "stress" && to.kind === "force")
+  ) {
+    return "Incompatible dimensions: Force cannot be directly converted to Stress."
+  }
+  if (from.kind === "temperature" && to.kind === "delta-t") {
+    return "Absolute temperature and a temperature difference are different conversions. Use Temperature difference for ΔT."
+  }
+  return `Incompatible dimensions: ${quantityName(from)} cannot be directly converted to ${quantityName(to)}.`
+}
+
+export function toSI(value: number, unit: UnitDef): number {
+  return value * unit.scale + unit.offset
+}
+
+export function fromSI(si: number, unit: UnitDef): number {
+  return (si - unit.offset) / unit.scale
+}
+
+export function convert(value: number, fromId: string, toId: string): number {
+  if (!Number.isFinite(value)) throw new ConvertError("Invalid number.")
+  const from = unitById(fromId)
+  const to = unitById(toId)
+  if (!from || !to) throw new ConvertError("Unknown unit.")
+  const why = incompatibility(from, to)
+  if (why) throw new ConvertError(why)
+  const si = toSI(value, from)
+  if (from.kind === "temperature" && si < -1e-9) {
+    throw new ConvertError("Absolute temperature below 0 K is invalid.")
+  }
+  return fromSI(si, to)
+}
+
+export function convertAcross(value: number, from: UnitDef, to: UnitDef): number {
+  return convert(value, from.id, to.id)
+}
+
+
+========================================================================
+FILE src/units/definitions.ts
+========================================================================
+
+import { dim, type Dim } from "./dimensions.ts"
+
+export type UnitDef = {
+  id: string
+  symbol: string
+  name: string
+  category: string
+  kind: string
+  dim: Dim
+  /** SI = value * scale + offset. Offset is only for absolute temperature. */
+  scale: number
+  offset: number
+  aliases: string[]
+}
+
+export type Category = {
+  id: string
+  label: string
+  group: string
+  kind: string
+  blurb: string
+}
+
+const IN = 0.0254
+const FT = 0.3048
+const LB = 0.45359237
+const LBF = 4.4482216152605
+const G0 = 9.80665
+const BTU = 1055.05585262
+const GAL_US = 231 * IN ** 3
+const GAL_IMP = 0.00454609
+
+export const CATEGORIES: Category[] = [
+  { id: "length", label: "Length", group: "Geometry", kind: "length", blurb: "Linear measure." },
+  { id: "area", label: "Area", group: "Geometry", kind: "area", blurb: "Surface measure." },
+  { id: "volume", label: "Volume", group: "Geometry", kind: "volume", blurb: "Capacity. US and Imperial gallons are separate." },
+  { id: "section-modulus", label: "Section modulus", group: "Section", kind: "section-modulus", blurb: "Elastic section modulus. Not volume, even though both are length³." },
+  { id: "area-inertia", label: "Area moment of inertia", group: "Section", kind: "area-inertia", blurb: "Second moment of area. Not mass moment of inertia." },
+  { id: "radius", label: "Radius of gyration", group: "Section", kind: "length", blurb: "Length. Kept as its own desk so it is not mixed with member length by habit." },
+  { id: "mass-inertia", label: "Mass moment of inertia", group: "Section", kind: "mass-inertia", blurb: "Rotational inertia of mass. Not Ixx of a section." },
+  { id: "mass", label: "Mass", group: "Mechanics", kind: "mass", blurb: "Mass. Not weight." },
+  { id: "mass-length", label: "Mass per length", group: "Mechanics", kind: "mass-length", blurb: "Linear density of sections, rope, rail." },
+  { id: "force", label: "Force", group: "Mechanics", kind: "force", blurb: "Force, including kilogram-force and tonne-force." },
+  { id: "moment", label: "Moment / torque", group: "Mechanics", kind: "moment", blurb: "Moment and torque share this dimension." },
+  { id: "pressure", label: "Pressure / stress", group: "Mechanics", kind: "stress", blurb: "Pressure and stress. N/mm² is exactly 1 MPa." },
+  { id: "stress", label: "Stress / modulus", group: "Mechanics", kind: "stress", blurb: "The same dimension as pressure, shorter structural set." },
+  { id: "area-load", label: "Area load", group: "Mechanics", kind: "stress", blurb: "Force per area, including psf." },
+  { id: "line-load", label: "Linear load", group: "Mechanics", kind: "line-load", blurb: "Force per length. 1 kN/m = 1 N/mm." },
+  { id: "density", label: "Density", group: "Mechanics", kind: "density", blurb: "Mass density." },
+  { id: "velocity", label: "Velocity", group: "Motion", kind: "velocity", blurb: "Linear speed." },
+  { id: "acceleration", label: "Acceleration", group: "Motion", kind: "acceleration", blurb: "Includes standard gravity g = 9.80665 m/s²." },
+  { id: "angular", label: "Angular velocity", group: "Motion", kind: "angular", blurb: "1 rpm = 2π/60 rad/s. Not a conversion to hertz." },
+  { id: "frequency", label: "Frequency", group: "Motion", kind: "frequency", blurb: "Cyclic frequency. rpm is under angular velocity." },
+  { id: "vol-flow", label: "Volumetric flow", group: "Flow", kind: "vol-flow", blurb: "US and Imperial GPM are separate." },
+  { id: "mass-flow", label: "Mass flow", group: "Flow", kind: "mass-flow", blurb: "Mass per time." },
+  { id: "dyn-visc", label: "Dynamic viscosity", group: "Flow", kind: "dyn-visc", blurb: "1 cP = 1 mPa·s." },
+  { id: "kin-visc", label: "Kinematic viscosity", group: "Flow", kind: "kin-visc", blurb: "1 cSt = 1 mm²/s." },
+  { id: "energy", label: "Energy", group: "Thermal", kind: "energy", blurb: "Work and heat." },
+  { id: "power", label: "Power", group: "Thermal", kind: "power", blurb: "Mechanical horsepower and metric horsepower are separate." },
+  { id: "temperature", label: "Temperature", group: "Thermal", kind: "temperature", blurb: "Absolute temperature. Offsets are applied. Not a temperature difference." },
+  { id: "delta-t", label: "Temperature difference", group: "Thermal", kind: "delta-t", blurb: "ΔT only. 1 Δ°C = 1 K. Not an absolute temperature." },
+  { id: "conductivity", label: "Thermal conductivity", group: "Thermal", kind: "conductivity", blurb: "Per kelvin and per degree Celsius are the same interval." },
+  { id: "heat-flux", label: "Heat flux", group: "Thermal", kind: "heat-flux", blurb: "Power per area." },
+  { id: "specific-heat", label: "Specific heat", group: "Thermal", kind: "specific-heat", blurb: "Per mass per temperature interval." },
+  { id: "htc", label: "Heat transfer coefficient", group: "Thermal", kind: "htc", blurb: "Surface coefficient." },
+  { id: "expansion", label: "Thermal expansion", group: "Thermal", kind: "expansion", blurb: "Linear expansion coefficient." },
+  { id: "surface", label: "Surface tension", group: "Thermal", kind: "surface", blurb: "Force per length. Not a structural line load." },
+  { id: "voltage", label: "Voltage", group: "Electrical", kind: "voltage", blurb: "Electric potential. Not convertible to current or resistance." },
+  { id: "current", label: "Current", group: "Electrical", kind: "current", blurb: "Electric current." },
+  { id: "resistance", label: "Resistance", group: "Electrical", kind: "resistance", blurb: "Not conductance. Invert in a circuit calculation, not here." },
+  { id: "conductance", label: "Conductance", group: "Electrical", kind: "conductance", blurb: "Siemens. Not a resistance conversion." },
+  { id: "capacitance", label: "Capacitance", group: "Electrical", kind: "capacitance", blurb: "Farad." },
+  { id: "inductance", label: "Inductance", group: "Electrical", kind: "inductance", blurb: "Henry." },
+  { id: "charge", label: "Charge", group: "Electrical", kind: "charge", blurb: "Coulomb. Bare “C” in the search bar is read as °C." },
+]
+
+function add(
+  list: UnitDef[],
+  id: string,
+  symbol: string,
+  name: string,
+  category: string,
+  kind: string,
+  d: Dim,
+  scale: number,
+  aliases: string[],
+  offset = 0,
+) {
+  list.push({ id, symbol, name, category, kind, dim: d, scale, offset, aliases: [symbol, id, ...aliases] })
+}
+
+function build(): UnitDef[] {
+  const u: UnitDef[] = []
+  const L = dim({ L: 1 })
+  add(u, "nm", "nm", "nanometre", "length", "length", L, 1e-9, ["nanometer", "nanometre"])
+  add(u, "um", "µm", "micrometre", "length", "length", L, 1e-6, ["μm", "um", "micron", "micrometre", "micrometer"])
+  add(u, "mm", "mm", "millimetre", "length", "length", L, 1e-3, ["millimetre", "millimeter"])
+  add(u, "cm", "cm", "centimetre", "length", "length", L, 1e-2, ["centimetre", "centimeter"])
+  add(u, "m", "m", "metre", "length", "length", L, 1, ["metre", "meter"])
+  add(u, "km", "km", "kilometre", "length", "length", L, 1e3, ["kilometre", "kilometer"])
+  add(u, "in", "in", "inch", "length", "length", L, IN, ["inch", "inches", '"'])
+  add(u, "ft", "ft", "foot", "length", "length", L, FT, ["foot", "feet", "ft"])
+  add(u, "yd", "yd", "yard", "length", "length", L, 0.9144, ["yard", "yards"])
+  add(u, "mi", "mi", "mile", "length", "length", L, 1609.344, ["mile", "miles"])
+
+  add(u, "mm-r", "mm", "millimetre", "radius", "length", L, 1e-3, [])
+  add(u, "cm-r", "cm", "centimetre", "radius", "length", L, 1e-2, [])
+  add(u, "m-r", "m", "metre", "radius", "length", L, 1, [])
+  add(u, "in-r", "in", "inch", "radius", "length", L, IN, [])
+
+  const A = dim({ L: 2 })
+  add(u, "mm2", "mm²", "square millimetre", "area", "area", A, 1e-6, ["mm2", "mm^2"])
+  add(u, "cm2", "cm²", "square centimetre", "area", "area", A, 1e-4, ["cm2", "cm^2"])
+  add(u, "m2", "m²", "square metre", "area", "area", A, 1, ["m2", "m^2"])
+  add(u, "in2", "in²", "square inch", "area", "area", A, IN ** 2, ["in2", "in^2"])
+  add(u, "ft2", "ft²", "square foot", "area", "area", A, FT ** 2, ["ft2", "ft^2"])
+
+  const V = dim({ L: 3 })
+  add(u, "mm3", "mm³", "cubic millimetre", "volume", "volume", V, 1e-9, ["mm3", "mm^3"])
+  add(u, "cm3", "cm³", "cubic centimetre", "volume", "volume", V, 1e-6, ["cm3", "cm^3"])
+  add(u, "m3", "m³", "cubic metre", "volume", "volume", V, 1, ["m3", "m^3"])
+  add(u, "mL", "mL", "millilitre", "volume", "volume", V, 1e-6, ["ml", "millilitre", "milliliter"])
+  add(u, "L", "L", "litre", "volume", "volume", V, 1e-3, ["l", "litre", "liter"])
+  add(u, "in3", "in³", "cubic inch", "volume", "volume", V, IN ** 3, ["in3", "in^3"])
+  add(u, "ft3", "ft³", "cubic foot", "volume", "volume", V, FT ** 3, ["ft3", "ft^3"])
+  add(u, "gal-us", "gal US", "US gallon", "volume", "volume", V, GAL_US, ["gal", "gallon", "usgal", "gal-us"])
+  add(u, "gal-imp", "gal Imp", "Imperial gallon", "volume", "volume", V, GAL_IMP, ["galimp", "ukgal", "gal-imp", "imp gal"])
+
+  add(u, "mm3-s", "mm³", "cubic millimetre", "section-modulus", "section-modulus", V, 1e-9, [])
+  add(u, "cm3-s", "cm³", "cubic centimetre", "section-modulus", "section-modulus", V, 1e-6, [])
+  add(u, "m3-s", "m³", "cubic metre", "section-modulus", "section-modulus", V, 1, [])
+  add(u, "in3-s", "in³", "cubic inch", "section-modulus", "section-modulus", V, IN ** 3, [])
+  add(u, "ft3-s", "ft³", "cubic foot", "section-modulus", "section-modulus", V, FT ** 3, [])
+
+  const I4 = dim({ L: 4 })
+  add(u, "mm4", "mm⁴", "millimetre to the fourth", "area-inertia", "area-inertia", I4, 1e-12, ["mm4", "mm^4"])
+  add(u, "cm4", "cm⁴", "centimetre to the fourth", "area-inertia", "area-inertia", I4, 1e-8, ["cm4", "cm^4"])
+  add(u, "m4", "m⁴", "metre to the fourth", "area-inertia", "area-inertia", I4, 1, ["m4", "m^4"])
+  add(u, "in4", "in⁴", "inch to the fourth", "area-inertia", "area-inertia", I4, IN ** 4, ["in4", "in^4"])
+  add(u, "ft4", "ft⁴", "foot to the fourth", "area-inertia", "area-inertia", I4, FT ** 4, ["ft4", "ft^4"])
+
+  const MI = dim({ M: 1, L: 2 })
+  add(u, "kgm2", "kg·m²", "kilogram square metre", "mass-inertia", "mass-inertia", MI, 1, ["kgm2", "kg·m2"])
+  add(u, "kgmm2", "kg·mm²", "kilogram square millimetre", "mass-inertia", "mass-inertia", MI, 1e-6, ["kgmm2"])
+  add(u, "lbft2", "lb·ft²", "pound square foot", "mass-inertia", "mass-inertia", MI, LB * FT ** 2, ["lbft2"])
+  add(u, "lbin2", "lb·in²", "pound square inch", "mass-inertia", "mass-inertia", MI, LB * IN ** 2, ["lbin2"])
+
+  const M = dim({ M: 1 })
+  add(u, "mg", "mg", "milligram", "mass", "mass", M, 1e-6, ["milligram"])
+  add(u, "g", "g", "gram", "mass", "mass", M, 1e-3, ["gram"])
+  add(u, "kg", "kg", "kilogram", "mass", "mass", M, 1, ["kilogram"])
+  add(u, "t", "t", "tonne", "mass", "mass", M, 1e3, ["tonne", "metric ton"])
+  add(u, "oz", "oz", "ounce", "mass", "mass", M, 0.028349523125, ["ounce"])
+  add(u, "lb", "lb", "pound", "mass", "mass", M, LB, ["pound", "lbs"])
+  add(u, "ton-short", "ton short", "short ton", "mass", "mass", M, 907.18474, ["short ton", "us ton", "ton-short"])
+  add(u, "ton-long", "ton long", "long ton", "mass", "mass", M, 1016.0469088, ["long ton", "uk ton", "ton-long"])
+
+  const ML = dim({ M: 1, L: -1 })
+  add(u, "kg/m", "kg/m", "kilogram per metre", "mass-length", "mass-length", ML, 1, ["kg/m"])
+  add(u, "kg/mm", "kg/mm", "kilogram per millimetre", "mass-length", "mass-length", ML, 1e3, ["kg/mm"])
+  add(u, "g/m", "g/m", "gram per metre", "mass-length", "mass-length", ML, 1e-3, ["g/m"])
+  add(u, "lb/ft", "lb/ft", "pound per foot", "mass-length", "mass-length", ML, LB / FT, ["lb/ft"])
+
+  const F = dim({ M: 1, L: 1, T: -2 })
+  add(u, "N", "N", "newton", "force", "force", F, 1, ["newton"])
+  add(u, "kN", "kN", "kilonewton", "force", "force", F, 1e3, ["kn", "kilonewton"])
+  add(u, "MN", "MN", "meganewton", "force", "force", F, 1e6, ["meganewton"])
+  add(u, "lbf", "lbf", "pound-force", "force", "force", F, LBF, ["lbf"])
+  add(u, "kip", "kip", "kip", "force", "force", F, 1000 * LBF, ["kip", "kips"])
+  add(u, "kgf", "kgf", "kilogram-force", "force", "force", F, G0, ["kgf", "kp"])
+  add(u, "tf", "tf", "tonne-force", "force", "force", F, 1000 * G0, ["tf", "tonnef", "tonne-force"])
+
+  const Mo = dim({ M: 1, L: 2, T: -2 })
+  add(u, "Nmm", "N·mm", "newton millimetre", "moment", "moment", Mo, 1e-3, ["nmm", "N.mm", "N·mm"])
+  add(u, "Nm", "N·m", "newton metre", "moment", "moment", Mo, 1, ["N.m", "N·m", "N-m"])
+  add(u, "kNm", "kN·m", "kilonewton metre", "moment", "moment", Mo, 1e3, ["knm", "kN.m", "kN·m"])
+  add(u, "kgfm", "kgf·m", "kilogram-force metre", "moment", "moment", Mo, G0, ["kgfm", "kgf.m"])
+  add(u, "lbfin", "lbf·in", "pound-force inch", "moment", "moment", Mo, LBF * IN, ["lbfin", "lbf.in", "lbf·in"])
+  add(u, "lbfft", "lbf·ft", "pound-force foot", "moment", "moment", Mo, LBF * FT, ["lbfft", "lbf.ft", "lbf·ft"])
+  add(u, "kipft", "kip·ft", "kip foot", "moment", "moment", Mo, 1000 * LBF * FT, ["kipft", "kip.ft"])
+
+  const P = dim({ M: 1, L: -1, T: -2 })
+  const pressure = (cat: string) => {
+    add(u, `${cat}:Pa`, "Pa", "pascal", cat, "stress", P, 1, cat === "pressure" ? ["pa", "pascal"] : [])
+    add(u, `${cat}:kPa`, "kPa", "kilopascal", cat, "stress", P, 1e3, cat === "pressure" ? ["kpa"] : [])
+    add(u, `${cat}:MPa`, "MPa", "megapascal", cat, "stress", P, 1e6, cat === "pressure" ? ["mpa", "MPa", "MPA"] : [])
+    add(u, `${cat}:GPa`, "GPa", "gigapascal", cat, "stress", P, 1e9, cat === "pressure" ? ["gpa"] : [])
+    add(u, `${cat}:N/mm2`, "N/mm²", "newton per square millimetre", cat, "stress", P, 1e6, cat === "pressure" ? ["N/mm2", "n/mm2", "N/mm^2"] : [])
+  }
+  pressure("pressure")
+  add(u, "bar", "bar", "bar", "pressure", "stress", P, 1e5, ["bar"])
+  add(u, "mbar", "mbar", "millibar", "pressure", "stress", P, 100, ["mbar"])
+  add(u, "psi", "psi", "pound per square inch", "pressure", "stress", P, LBF / IN ** 2, ["psi"])
+  add(u, "ksi", "ksi", "kip per square inch", "pressure", "stress", P, (1000 * LBF) / IN ** 2, ["ksi"])
+  add(u, "atm", "atm", "standard atmosphere", "pressure", "stress", P, 101325, ["atm"])
+  add(u, "kgf/cm2", "kgf/cm²", "kilogram-force per square centimetre", "pressure", "stress", P, G0 / 1e-4, ["kgf/cm2", "kg/cm2"])
+  add(u, "mmHg", "mmHg", "millimetre of mercury", "pressure", "stress", P, 133.322387415, ["mmhg", "torr"])
+  add(u, "inHg", "inHg", "inch of mercury", "pressure", "stress", P, 3386.389, ["inhg"])
+  add(u, "mH2O", "mH₂O", "metre of water", "pressure", "stress", P, 1000 * G0, ["mh2o", "mH2O", "m water"])
+  add(u, "ftH2O", "ftH₂O", "foot of water", "pressure", "stress", P, 1000 * G0 * FT, ["fth2o", "ftH2O"])
+
+  add(u, "stress:Pa", "Pa", "pascal", "stress", "stress", P, 1, [])
+  add(u, "stress:kPa", "kPa", "kilopascal", "stress", "stress", P, 1e3, [])
+  add(u, "stress:MPa", "MPa", "megapascal", "stress", "stress", P, 1e6, [])
+  add(u, "stress:GPa", "GPa", "gigapascal", "stress", "stress", P, 1e9, [])
+  add(u, "stress:psi", "psi", "pound per square inch", "stress", "stress", P, LBF / IN ** 2, [])
+  add(u, "stress:ksi", "ksi", "kip per square inch", "stress", "stress", P, (1000 * LBF) / IN ** 2, [])
+  add(u, "stress:N/mm2", "N/mm²", "newton per square millimetre", "stress", "stress", P, 1e6, [])
+
+  add(u, "aload:Pa", "Pa", "pascal", "area-load", "stress", P, 1, [])
+  add(u, "aload:kPa", "kPa", "kilopascal", "area-load", "stress", P, 1e3, [])
+  add(u, "aload:MPa", "MPa", "megapascal", "area-load", "stress", P, 1e6, [])
+  add(u, "aload:N/mm2", "N/mm²", "newton per square millimetre", "area-load", "stress", P, 1e6, [])
+  add(u, "kN/m2", "kN/m²", "kilonewton per square metre", "area-load", "stress", P, 1e3, ["kn/m2", "kN/m2"])
+  add(u, "psf", "psf", "pound per square foot", "area-load", "stress", P, LBF / FT ** 2, ["psf"])
+  add(u, "aload:psi", "psi", "pound per square inch", "area-load", "stress", P, LBF / IN ** 2, [])
+
+  const LL = dim({ M: 1, T: -2 })
+  add(u, "N/mm", "N/mm", "newton per millimetre", "line-load", "line-load", LL, 1e3, ["N/mm", "n/mm"])
+  add(u, "N/m", "N/m", "newton per metre", "line-load", "line-load", LL, 1, ["N/m", "n/m"])
+  add(u, "kN/m", "kN/m", "kilonewton per metre", "line-load", "line-load", LL, 1e3, ["kn/m", "kN/m"])
+  add(u, "lbf/in", "lbf/in", "pound-force per inch", "line-load", "line-load", LL, LBF / IN, ["lbf/in"])
+  add(u, "lbf/ft", "lbf/ft", "pound-force per foot", "line-load", "line-load", LL, LBF / FT, ["lbf/ft"])
+  add(u, "kip/ft", "kip/ft", "kip per foot", "line-load", "line-load", LL, (1000 * LBF) / FT, ["kip/ft"])
+
+  const D = dim({ M: 1, L: -3 })
+  add(u, "kg/m3", "kg/m³", "kilogram per cubic metre", "density", "density", D, 1, ["kg/m3", "kg/m^3"])
+  add(u, "g/cm3", "g/cm³", "gram per cubic centimetre", "density", "density", D, 1e3, ["g/cm3", "g/cm^3", "g/cc"])
+  add(u, "kg/L", "kg/L", "kilogram per litre", "density", "density", D, 1e3, ["kg/l", "kg/L"])
+  add(u, "lb/ft3", "lb/ft³", "pound per cubic foot", "density", "density", D, LB / FT ** 3, ["lb/ft3", "lb/ft^3"])
+  add(u, "lb/in3", "lb/in³", "pound per cubic inch", "density", "density", D, LB / IN ** 3, ["lb/in3"])
+
+  const Vel = dim({ L: 1, T: -1 })
+  add(u, "mm/s", "mm/s", "millimetre per second", "velocity", "velocity", Vel, 1e-3, ["mm/s"])
+  add(u, "m/s", "m/s", "metre per second", "velocity", "velocity", Vel, 1, ["m/s"])
+  add(u, "km/h", "km/h", "kilometre per hour", "velocity", "velocity", Vel, 1000 / 3600, ["km/h", "kph"])
+  add(u, "ft/s", "ft/s", "foot per second", "velocity", "velocity", Vel, FT, ["ft/s", "fps"])
+  add(u, "ft/min", "ft/min", "foot per minute", "velocity", "velocity", Vel, FT / 60, ["ft/min", "fpm"])
+  add(u, "mph", "mph", "mile per hour", "velocity", "velocity", Vel, 1609.344 / 3600, ["mph"])
+  add(u, "kn", "kn", "knot", "velocity", "velocity", Vel, 1852 / 3600, ["knot", "knots", "kn"])
+
+  const Acc = dim({ L: 1, T: -2 })
+  add(u, "m/s2", "m/s²", "metre per second squared", "acceleration", "acceleration", Acc, 1, ["m/s2", "m/s^2"])
+  add(u, "mm/s2", "mm/s²", "millimetre per second squared", "acceleration", "acceleration", Acc, 1e-3, ["mm/s2"])
+  add(u, "ft/s2", "ft/s²", "foot per second squared", "acceleration", "acceleration", Acc, FT, ["ft/s2"])
+  add(u, "g0", "g", "standard gravity", "acceleration", "acceleration", Acc, G0, ["g", "gee"])
+
+  const Ang = dim({ T: -1 })
+  add(u, "rad/s", "rad/s", "radian per second", "angular", "angular", Ang, 1, ["rad/s"])
+  add(u, "deg/s", "deg/s", "degree per second", "angular", "angular", Ang, Math.PI / 180, ["deg/s"])
+  add(u, "rpm", "rpm", "revolution per minute", "angular", "angular", Ang, (2 * Math.PI) / 60, ["rpm", "RPM", "r/min"])
+  add(u, "rps", "rps", "revolution per second", "angular", "angular", Ang, 2 * Math.PI, ["rps"])
+
+  const Hz = dim({ T: -1 })
+  add(u, "Hz", "Hz", "hertz", "frequency", "frequency", Hz, 1, ["hz", "hertz"])
+  add(u, "kHz", "kHz", "kilohertz", "frequency", "frequency", Hz, 1e3, ["khz"])
+  add(u, "MHz", "MHz", "megahertz", "frequency", "frequency", Hz, 1e6, ["mhz"])
+
+  const Q = dim({ L: 3, T: -1 })
+  add(u, "m3/s", "m³/s", "cubic metre per second", "vol-flow", "vol-flow", Q, 1, ["m3/s"])
+  add(u, "m3/min", "m³/min", "cubic metre per minute", "vol-flow", "vol-flow", Q, 1 / 60, ["m3/min"])
+  add(u, "m3/h", "m³/h", "cubic metre per hour", "vol-flow", "vol-flow", Q, 1 / 3600, ["m3/h", "m3/hr"])
+  add(u, "L/s", "L/s", "litre per second", "vol-flow", "vol-flow", Q, 1e-3, ["l/s", "L/s"])
+  add(u, "L/min", "L/min", "litre per minute", "vol-flow", "vol-flow", Q, 1e-3 / 60, ["l/min", "L/min", "lpm"])
+  add(u, "L/h", "L/h", "litre per hour", "vol-flow", "vol-flow", Q, 1e-3 / 3600, ["l/h", "L/h"])
+  add(u, "cfm", "CFM", "cubic foot per minute", "vol-flow", "vol-flow", Q, FT ** 3 / 60, ["cfm", "CFM"])
+  add(u, "gpm-us", "GPM US", "US gallon per minute", "vol-flow", "vol-flow", Q, GAL_US / 60, ["gpm", "gpm-us", "usgpm"])
+  add(u, "gpm-imp", "GPM Imp", "Imperial gallon per minute", "vol-flow", "vol-flow", Q, GAL_IMP / 60, ["gpm-imp", "ukgpm"])
+
+  const MF = dim({ M: 1, T: -1 })
+  add(u, "kg/s", "kg/s", "kilogram per second", "mass-flow", "mass-flow", MF, 1, ["kg/s"])
+  add(u, "kg/min", "kg/min", "kilogram per minute", "mass-flow", "mass-flow", MF, 1 / 60, ["kg/min"])
+  add(u, "kg/h", "kg/h", "kilogram per hour", "mass-flow", "mass-flow", MF, 1 / 3600, ["kg/h"])
+  add(u, "t/h", "t/h", "tonne per hour", "mass-flow", "mass-flow", MF, 1000 / 3600, ["t/h"])
+  add(u, "lb/s", "lb/s", "pound per second", "mass-flow", "mass-flow", MF, LB, ["lb/s"])
+  add(u, "lb/min", "lb/min", "pound per minute", "mass-flow", "mass-flow", MF, LB / 60, ["lb/min"])
+  add(u, "lb/h", "lb/h", "pound per hour", "mass-flow", "mass-flow", MF, LB / 3600, ["lb/h"])
+
+  const DV = dim({ M: 1, L: -1, T: -1 })
+  add(u, "Pas", "Pa·s", "pascal second", "dyn-visc", "dyn-visc", DV, 1, ["Pa.s", "Pa·s", "pas"])
+  add(u, "mPas", "mPa·s", "millipascal second", "dyn-visc", "dyn-visc", DV, 1e-3, ["mPa.s", "mpas"])
+  add(u, "cP", "cP", "centipoise", "dyn-visc", "dyn-visc", DV, 1e-3, ["cp", "cP"])
+  add(u, "P", "P", "poise", "dyn-visc", "dyn-visc", DV, 0.1, ["poise"])
+  add(u, "lb/fts", "lb/(ft·s)", "pound per foot second", "dyn-visc", "dyn-visc", DV, LB / FT, ["lb/ft.s"])
+
+  const KV = dim({ L: 2, T: -1 })
+  add(u, "m2/s", "m²/s", "square metre per second", "kin-visc", "kin-visc", KV, 1, ["m2/s"])
+  add(u, "mm2/s", "mm²/s", "square millimetre per second", "kin-visc", "kin-visc", KV, 1e-6, ["mm2/s"])
+  add(u, "cSt", "cSt", "centistokes", "kin-visc", "kin-visc", KV, 1e-6, ["cst", "cSt"])
+  add(u, "St", "St", "stokes", "kin-visc", "kin-visc", KV, 1e-4, ["st", "St"])
+  add(u, "ft2/s", "ft²/s", "square foot per second", "kin-visc", "kin-visc", KV, FT ** 2, ["ft2/s"])
+
+  const E = dim({ M: 1, L: 2, T: -2 })
+  add(u, "J", "J", "joule", "energy", "energy", E, 1, ["j", "joule"])
+  add(u, "kJ", "kJ", "kilojoule", "energy", "energy", E, 1e3, ["kj"])
+  add(u, "MJ", "MJ", "megajoule", "energy", "energy", E, 1e6, ["mj"])
+  add(u, "Wh", "Wh", "watt hour", "energy", "energy", E, 3600, ["wh"])
+  add(u, "kWh", "kWh", "kilowatt hour", "energy", "energy", E, 3.6e6, ["kwh"])
+  add(u, "BTU", "BTU", "British thermal unit", "energy", "energy", E, BTU, ["btu"])
+  add(u, "cal", "cal", "calorie", "energy", "energy", E, 4.184, ["cal"])
+  add(u, "kcal", "kcal", "kilocalorie", "energy", "energy", E, 4184, ["kcal"])
+  add(u, "ftlbf", "ft·lbf", "foot pound-force", "energy", "energy", E, FT * LBF, ["ft.lbf", "ftlbf"])
+
+  const W = dim({ M: 1, L: 2, T: -3 })
+  add(u, "W", "W", "watt", "power", "power", W, 1, ["w", "watt"])
+  add(u, "kW", "kW", "kilowatt", "power", "power", W, 1e3, ["kw"])
+  add(u, "MW", "MW", "megawatt", "power", "power", W, 1e6, ["megawatt"])
+  add(u, "hp", "hp", "mechanical horsepower", "power", "power", W, 745.6998715822702, ["hp", "bhp"])
+  add(u, "hp-metric", "hp metric", "metric horsepower", "power", "power", W, 735.49875, ["cv", "ps", "hp-metric", "metric hp"])
+  add(u, "BTU/h", "BTU/h", "BTU per hour", "power", "power", W, BTU / 3600, ["btu/h"])
+  add(u, "TR", "TR", "ton of refrigeration", "power", "power", W, (12000 * BTU) / 3600, ["TR", "ton-ref"])
+
+  const Fscale = 5 / 9
+  const Foff = 273.15 - 32 * Fscale
+  const Temp = dim({ Th: 1 })
+  add(u, "C", "°C", "degree Celsius", "temperature", "temperature", Temp, 1, ["°C", "degC", "celsius", "C"], 273.15)
+  add(u, "F", "°F", "degree Fahrenheit", "temperature", "temperature", Temp, Fscale, ["°F", "degF", "fahrenheit", "F"], Foff)
+  add(u, "K", "K", "kelvin", "temperature", "temperature", Temp, 1, ["kelvin", "K"], 0)
+  add(u, "R", "°R", "degree Rankine", "temperature", "temperature", Temp, Fscale, ["°R", "rankine", "R"], 0)
+
+  const dT = dim({ dTh: 1 })
+  add(u, "dC", "Δ°C", "celsius difference", "delta-t", "delta-t", dT, 1, ["deltaC", "dC", "ΔC", "Δ°C"])
+  add(u, "dK", "ΔK", "kelvin difference", "delta-t", "delta-t", dT, 1, ["deltaK", "dK", "ΔK"])
+  add(u, "dF", "Δ°F", "fahrenheit difference", "delta-t", "delta-t", dT, Fscale, ["deltaF", "dF", "ΔF", "Δ°F"])
+  add(u, "dR", "Δ°R", "rankine difference", "delta-t", "delta-t", dT, Fscale, ["ΔR", "Δ°R"])
+
+  const Kth = dim({ M: 1, L: 1, T: -3, dTh: -1 })
+  const btuPerHmFtF = (BTU / 3600) * (1 / FT) * (9 / 5)
+  add(u, "W/mK", "W/(m·K)", "watt per metre kelvin", "conductivity", "conductivity", Kth, 1, ["W/mK", "W/(m·K)", "W/m.K"])
+  add(u, "W/mC", "W/(m·°C)", "watt per metre celsius", "conductivity", "conductivity", Kth, 1, ["W/mC", "W/(m·C)"])
+  add(u, "BTU/hftF", "BTU/(h·ft·°F)", "BTU per hour foot fahrenheit", "conductivity", "conductivity", Kth, btuPerHmFtF, ["BTU/hftF"])
+
+  const HF = dim({ M: 1, T: -3 })
+  add(u, "W/m2", "W/m²", "watt per square metre", "heat-flux", "heat-flux", HF, 1, ["W/m2"])
+  add(u, "kW/m2", "kW/m²", "kilowatt per square metre", "heat-flux", "heat-flux", HF, 1e3, ["kW/m2"])
+  add(u, "BTU/hft2", "BTU/(h·ft²)", "BTU per hour square foot", "heat-flux", "heat-flux", HF, (BTU / 3600) / FT ** 2, ["BTU/hft2"])
+
+  const CP = dim({ L: 2, T: -2, dTh: -1 })
+  add(u, "J/kgK", "J/(kg·K)", "joule per kilogram kelvin", "specific-heat", "specific-heat", CP, 1, ["J/kgK"])
+  add(u, "kJ/kgK", "kJ/(kg·K)", "kilojoule per kilogram kelvin", "specific-heat", "specific-heat", CP, 1e3, ["kJ/kgK"])
+  add(u, "BTU/lbF", "BTU/(lb·°F)", "BTU per pound fahrenheit", "specific-heat", "specific-heat", CP, (BTU / LB) * (9 / 5), ["BTU/lbF"])
+
+  const HTC = dim({ M: 1, T: -3, dTh: -1 })
+  add(u, "W/m2K", "W/(m²·K)", "watt per square metre kelvin", "htc", "htc", HTC, 1, ["W/m2K"])
+  add(u, "kW/m2K", "kW/(m²·K)", "kilowatt per square metre kelvin", "htc", "htc", HTC, 1e3, ["kW/m2K"])
+  add(u, "BTU/hft2F", "BTU/(h·ft²·°F)", "BTU per hour square foot fahrenheit", "htc", "htc", HTC, (BTU / 3600) / FT ** 2 * (9 / 5), ["BTU/hft2F"])
+
+  const AL = dim({ dTh: -1 })
+  add(u, "1/K", "1/K", "per kelvin", "expansion", "expansion", AL, 1, ["1/K"])
+  add(u, "um/mK", "µm/(m·K)", "micrometre per metre kelvin", "expansion", "expansion", AL, 1e-6, ["um/mK", "µm/mK"])
+  add(u, "1/F", "1/°F", "per fahrenheit", "expansion", "expansion", AL, 9 / 5, ["1/F", "1/°F"])
+
+  const ST = dim({ M: 1, T: -2 })
+  add(u, "N/m-s", "N/m", "newton per metre", "surface", "surface", ST, 1, [])
+  add(u, "mN/m", "mN/m", "millinewton per metre", "surface", "surface", ST, 1e-3, ["mN/m"])
+  add(u, "dyn/cm", "dyn/cm", "dyne per centimetre", "surface", "surface", ST, 1e-3, ["dyn/cm"])
+
+  add(u, "V", "V", "volt", "voltage", "voltage", dim({ U: 1 }), 1, ["volt", "V"])
+  add(u, "mV", "mV", "millivolt", "voltage", "voltage", dim({ U: 1 }), 1e-3, ["mv"])
+  add(u, "kV", "kV", "kilovolt", "voltage", "voltage", dim({ U: 1 }), 1e3, ["kv"])
+  add(u, "A", "A", "ampere", "current", "current", dim({ I: 1 }), 1, ["amp", "ampere", "A"])
+  add(u, "mA", "mA", "milliampere", "current", "current", dim({ I: 1 }), 1e-3, ["ma"])
+  add(u, "kA", "kA", "kiloampere", "current", "current", dim({ I: 1 }), 1e3, ["ka"])
+  add(u, "ohm", "Ω", "ohm", "resistance", "resistance", dim({ R: 1 }), 1, ["ohm", "Ω"])
+  add(u, "mohm", "mΩ", "milliohm", "resistance", "resistance", dim({ R: 1 }), 1e-3, ["mohm", "mΩ"])
+  add(u, "kohm", "kΩ", "kilohm", "resistance", "resistance", dim({ R: 1 }), 1e3, ["kohm", "kΩ"])
+  add(u, "Mohm", "MΩ", "megohm", "resistance", "resistance", dim({ R: 1 }), 1e6, ["Mohm", "MΩ"])
+  add(u, "S", "S", "siemens", "conductance", "conductance", dim({ G: 1 }), 1, ["siemens"])
+  add(u, "mS", "mS", "millisiemens", "conductance", "conductance", dim({ G: 1 }), 1e-3, ["mS"])
+  add(u, "farad", "F", "farad", "capacitance", "capacitance", dim({ C: 1 }), 1, ["farad"])
+  add(u, "uF", "µF", "microfarad", "capacitance", "capacitance", dim({ C: 1 }), 1e-6, ["uF", "µF"])
+  add(u, "nF", "nF", "nanofarad", "capacitance", "capacitance", dim({ C: 1 }), 1e-9, ["nF"])
+  add(u, "pF", "pF", "picofarad", "capacitance", "capacitance", dim({ C: 1 }), 1e-12, ["pF"])
+  add(u, "H", "H", "henry", "inductance", "inductance", dim({ H: 1 }), 1, ["henry"])
+  add(u, "mH", "mH", "millihenry", "inductance", "inductance", dim({ H: 1 }), 1e-3, ["mH"])
+  add(u, "uH", "µH", "microhenry", "inductance", "inductance", dim({ H: 1 }), 1e-6, ["uH", "µH"])
+  add(u, "Coul", "C", "coulomb", "charge", "charge", dim({ Qc: 1 }), 1, ["coulomb"])
+  add(u, "mC", "mC", "millicoulomb", "charge", "charge", dim({ Qc: 1 }), 1e-3, ["mC"])
+  add(u, "uC", "µC", "microcoulomb", "charge", "charge", dim({ Qc: 1 }), 1e-6, ["uC", "µC"])
+
+  return u
+}
+
+export const UNITS: UnitDef[] = build()
+
+/** Symbols that also belong to a more common unit. Display symbol stays; search alias does not. */
+const ALIAS_DENY: Record<string, string[]> = {
+  g0: ["g"],
+  kn: ["kn"],
+  "N/m-s": ["N/m"],
+  farad: ["F"],
+}
+
+for (const unit of UNITS) {
+  const deny = ALIAS_DENY[unit.id]
+  if (!deny) continue
+  unit.aliases = unit.aliases.filter((alias) => !deny.includes(alias))
+}
+
+const byId = new Map(UNITS.map((unit) => [unit.id, unit]))
+
+export function unitById(id: string): UnitDef | undefined {
+  return byId.get(id)
+}
+
+export function unitsInCategory(categoryId: string): UnitDef[] {
+  return UNITS.filter((unit) => unit.category === categoryId)
+}
+
+export function categoryById(id: string): Category | undefined {
+  return CATEGORIES.find((c) => c.id === id)
+}
+
+/** First category that owns a globally addressable alias. Radius duplicates are not in the alias map. */
+const aliasMap = new Map<string, UnitDef[]>()
+for (const unit of UNITS) {
+  if (unit.category === "radius" || unit.category === "stress" || unit.category === "area-load" || unit.category === "section-modulus") {
+    continue
+  }
+  for (const alias of unit.aliases) {
+    const key = alias.normalize("NFKC")
+    const list = aliasMap.get(key) ?? []
+    if (!list.includes(unit)) list.push(unit)
+    aliasMap.set(key, list)
+  }
+}
+
+export function lookupAlias(token: string): UnitDef | undefined {
+  const key = token.normalize("NFKC").trim()
+  const exact = aliasMap.get(key)
+  if (exact?.length === 1) return exact[0]
+  const folded = key.toLowerCase()
+  const hits = new Map<string, UnitDef>()
+  for (const [alias, units] of aliasMap) {
+    if (alias.toLowerCase() === folded) {
+      for (const unit of units) hits.set(unit.id, unit)
+    }
+  }
+  if (hits.size === 1) return [...hits.values()][0]
+  return undefined
+}
+
+
+========================================================================
+FILE src/units/dimensions.ts
+========================================================================
+
+/** SI base exponents plus separate absolute-temperature and temperature-difference axes. */
+export type Dim = {
+  L: number
+  M: number
+  T: number
+  I: number
+  Th: number
+  dTh: number
+  N: number
+  J: number
+  U: number
+  R: number
+  G: number
+  C: number
+  H: number
+  Qc: number
+}
+
+export const ZERO_DIM: Dim = {
+  L: 0, M: 0, T: 0, I: 0, Th: 0, dTh: 0, N: 0, J: 0, U: 0, R: 0, G: 0, C: 0, H: 0, Qc: 0,
+}
+
+export function dim(partial: Partial<Dim>): Dim {
+  return { ...ZERO_DIM, ...partial }
+}
+
+export function dimKey(d: Dim): string {
+  return (Object.keys(ZERO_DIM) as (keyof Dim)[]).map((k) => `${k}${d[k]}`).join(" ")
+}
+
+export function sameDim(a: Dim, b: Dim): boolean {
+  return dimKey(a) === dimKey(b)
+}
+
+
+========================================================================
+FILE src/units/format.ts
+========================================================================
+
+export type Notation = "eng" | "sci" | "fixed"
+
+export function formatValue(value: number, sig: number, notation: Notation): string {
+  if (!Number.isFinite(value)) return "—"
+  const figures = Math.min(8, Math.max(1, sig))
+  if (value === 0) return notation === "fixed" ? (0).toFixed(figures) : "0"
+  const sign = value < 0 ? "-" : ""
+  const abs = Math.abs(value)
+  if (notation === "fixed") {
+    return sign + abs.toFixed(figures)
+  }
+  if (notation === "sci") {
+    const exp = Math.floor(Math.log10(abs))
+    const mant = abs / 10 ** exp
+    return `${sign}${mant.toFixed(Math.max(0, figures - 1))}e${exp}`
+  }
+  let exp = Math.floor(Math.log10(abs))
+  if (!Number.isFinite(exp)) return "—"
+  const eng = Math.floor(exp / 3) * 3
+  const mant = abs / 10 ** eng
+  const mantExp = Math.floor(Math.log10(mant))
+  const decimals = Math.max(0, figures - mantExp - 1)
+  const body = mant.toFixed(decimals)
+  if (eng === 0) return sign + body
+  return `${sign}${body}e${eng}`
+}
+
+/** Enough digits to round-trip typical engineering values back through parse. */
+export function precise(value: number): string {
+  if (!Number.isFinite(value)) return ""
+  if (value === 0) return "0"
+  return value.toPrecision(12).replace(/\.?0+e/, "e").replace(/\.?0+$/, "")
+}
+
+
+========================================================================
+FILE src/units/parser.ts
+========================================================================
+
+import { lookupAlias, type UnitDef } from "./definitions.ts"
+import { parseStrictNumber } from "../reference/format.ts"
+
+export type ParsedQuantity = {
+  value: number
+  unit: UnitDef
+  to?: UnitDef
+}
+
+function normaliseToken(raw: string): string {
+  return raw
+    .normalize("NFKC")
+    .trim()
+    .replace(/μ/g, "µ")
+    .replace(/\s+/g, "")
+    .replace(/·/g, ".")
+}
+
+export function parseQuantity(raw: string): ParsedQuantity | null {
+  const text = raw.trim()
+  if (!text) return null
+  const toSplit = text.split(/\s+to\s+/i)
+  const left = toSplit[0] ?? ""
+  const right = toSplit[1]
+  const match = left.match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*(.*)$/i)
+  if (!match) return null
+  const value = parseStrictNumber(match[1] ?? "")
+  const token = normaliseToken(match[2] ?? "")
+  if (!token) return null
+  const unit = lookupAlias(token)
+  if (!unit) return null
+  let to: UnitDef | undefined
+  if (right?.trim()) {
+    const toUnit = lookupAlias(normaliseToken(right))
+    if (!toUnit) return null
+    to = toUnit
+  }
+  return { value, unit, to }
+}
+
+
+========================================================================
+FILE src/units/weight.ts
+========================================================================
+
+import { parseStrictNumber } from "../reference/format.ts"
+
+export const STANDARD_G = 9.80665
+
+export function weightNewton(massKg: number, g: number): number {
+  if (!Number.isFinite(massKg) || !Number.isFinite(g)) throw new Error("Invalid number.")
+  if (massKg < 0) throw new Error("Mass cannot be negative.")
+  if (!(g > 0)) throw new Error("Gravitational acceleration must be greater than zero.")
+  return massKg * g
+}
+
+export function parseWeightInputs(massRaw: string, gRaw: string): { massKg: number; g: number; newton: number } {
+  const massKg = parseStrictNumber(massRaw)
+  const g = parseStrictNumber(gRaw)
+  return { massKg, g, newton: weightNewton(massKg, g) }
+}
+
+
+========================================================================
+FILE src/reference/format.ts
+========================================================================
+
+/** Display rounding only. Callers keep full precision for further maths. */
+export function trimNum(n: number, digits: number): string {
+  if (!Number.isFinite(n)) return "—"
+  const neg = n < 0
+  const s = Math.abs(n).toFixed(digits)
+  const trimmed = s.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")
+  return neg ? `-${trimmed}` : trimmed
+}
+
+export function parseStrictNumber(raw: string): number {
+  const t = raw.trim().replace(/\s/g, "")
+  if (!t) throw new Error("Enter a number.")
+  if (/[,]/.test(t)) throw new Error("Invalid numeric string. No thousands separators.")
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(t)) {
+    throw new Error("Invalid numeric string.")
+  }
+  const n = Number(t)
+  if (!Number.isFinite(n)) throw new Error("Invalid number.")
+  return n
+}
+
+
+========================================================================
+FILE src/reference/query.ts
+========================================================================
+
+import { parseBoltQuery } from "../bolts/search.ts"
+import { parseQuantity } from "../units/parser.ts"
+import type { RouteHit } from "./registry.ts"
+
+export function routeQuery(raw: string): RouteHit {
+  const q = raw.trim()
+  if (!q) return { module: null }
+  let unit = false
+  let bolt = false
+  try {
+    unit = parseQuantity(q) != null
+  } catch {
+    unit = false
+  }
+  bolt = parseBoltQuery(q).matched
+  if (unit && !bolt) return { module: "units", q }
+  if (bolt && !unit) return { module: "bolts", q }
+  if (unit) return { module: "units", q }
+  if (bolt) return { module: "bolts", q }
+  if (/\b(plates?|buckling|stiffeners?)\b/i.test(q)) return { module: "plate", q }
+  return { module: null }
+}
+
+
+========================================================================
+FILE src/reference/registry.ts
+========================================================================
+
+export type ModuleStatus = "live" | "later"
+
+export type LabModule = {
+  id: string
+  title: string
+  summary: string
+  group: string
+  status: ModuleStatus
+  href?: string
+}
+
+/** Future rows are a library map only. They are not calculators. */
+export const LAB_MODULES: LabModule[] = [
+  { id: "IQ-CAL-PLB", title: "Plate and web buckling", summary: "Elastic critical stress, half-wave search, and a separate finite-element eigenvalue check. Code resistance is not enabled.", group: "Plate", status: "live", href: "/plate" },
+  { id: "IQ-REF-014", title: "Thread reference", summary: "Stand-alone thread tables beyond the bolt record.", group: "Fasteners", status: "later" },
+  { id: "IQ-REF-017", title: "Fastener tightening", summary: "Torque, preload and k-factor.", group: "Fasteners", status: "later" },
+  { id: "IQ-REF-002", title: "Universal unit converter", summary: "Type one value. The rest of that quantity converts. A mismatched dimension is refused.", group: "Desk", status: "live", href: "/units" },
+  { id: "IQ-REF-012", title: "Engineering constants", summary: "g, π, E, densities used as named constants.", group: "Desk", status: "later" },
+  { id: "IQ-REF-003", title: "Steel material properties", summary: "Plate and section grades.", group: "Materials", status: "later" },
+  { id: "IQ-REF-018", title: "Material density", summary: "Density database.", group: "Materials", status: "later" },
+  { id: "IQ-REF-004", title: "Structural steel sections", summary: "Catalogue properties.", group: "Section", status: "later" },
+  { id: "IQ-REF-016", title: "Standard plate sizes", summary: "Sheet and plate list.", group: "Section", status: "later" },
+  { id: "IQ-REF-005", title: "Weld reference", summary: "Fillet and butt geometry.", group: "Connection", status: "later" },
+  { id: "IQ-REF-006", title: "Pipe schedules", summary: "NPS and DN wall.", group: "Plant", status: "later" },
+  { id: "IQ-REF-007", title: "Flange reference", summary: "Facing and drilling.", group: "Plant", status: "later" },
+  { id: "IQ-REF-008", title: "Bearings", summary: "Boundary dimensions.", group: "Machine", status: "later" },
+  { id: "IQ-REF-009", title: "Shaft and key", summary: "Key seats and fits.", group: "Machine", status: "later" },
+  { id: "IQ-REF-010", title: "Springs", summary: "Wire and rate.", group: "Machine", status: "later" },
+  { id: "IQ-REF-011", title: "Crane components", summary: "Wheels, rails, hooks.", group: "Plant", status: "later" },
+  { id: "IQ-REF-013", title: "Wire rope", summary: "Construction and mass.", group: "Plant", status: "later" },
+  { id: "IQ-REF-015", title: "Tolerances and fits", summary: "Hole basis classes.", group: "Machine", status: "later" },
+  { id: "IQ-REF-019", title: "Surface finish", summary: "Ra and process.", group: "Machine", status: "later" },
+  { id: "IQ-REF-020", title: "Fluid properties", summary: "Density and viscosity.", group: "Plant", status: "later" },
+]
+
+export type RouteHit =
+  | { module: "bolts"; q: string }
+  | { module: "units"; q: string }
+  | { module: "plate"; q: string }
+  | { module: null }
+
+
+========================================================================
+FILE src/reference/version.ts
+========================================================================
+
+export const ENGINE_VERSION = "1.0.0"
+export const DATASET_VERSION = "1.0.0"
+export const DISCLAIMER =
+  "Reference/calculation aid only. The responsible engineer must verify applicability, inputs, assumptions and governing standards."

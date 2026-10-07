@@ -1,0 +1,3729 @@
+IQ-CAL-PLB WHOLE APP — PART 3 OF 6
+Plain text. Read this file directly. Do not unzip, download, or browse.
+This pack is the engineering website: plate buckling, bolts, units, and the pages that show them.
+Elastic plate engine IQ-PLB-E1.0. AS 4100 plate/web subset IQ-PLB-AS4100-D1.0.
+Not included: node_modules, package-lock, the copyrighted standard PDF, and the Grok preview-host login code.
+
+
+========================================================================
+FILE src/components/plate-tool.tsx
+========================================================================
+
+// @ts-nocheck
+import { useEffect, useMemo, useState } from "react"
+import { Fragment, jsx, jsxs } from "react/jsx-runtime"
+import { PlateDrawing } from "./plate-drawing.tsx"
+import { ModeView } from "./mode-view.tsx"
+import { trimNum } from "../reference/format.ts"
+import { classicalPlate } from "../plate/classical.ts"
+import { previewMesh, solvePlateFem, studyGrids, countHalfWaves } from "../plate/fem.ts"
+import { patchInterval } from "../plate/prestress.ts"
+import { newStiffener, plateMassKg, stiffenerMassKg, stiffenerProps } from "../plate/stiffeners.ts"
+import { buildPanels, classifyMode } from "../plate/subpanels.ts"
+import { designChecks } from "../plate/codes/dispatch.ts"
+import { PlateDesign } from "./plate-design.tsx"
+import { ELASTIC_ENGINE } from "../plate/version.ts"
+import {
+  FORCE_UNITS, LENGTH_UNITS, STRESS_UNITS,
+  forceToN, formatEntry, lengthToMm, mmToLength, mpaToStress, nPerMmToStiffness, nToForce, stiffnessToNPerMm, stressToMpa,
+} from "../plate/units.ts"
+
+var CYCLE = [
+	"ss",
+	"fixed",
+	"free",
+	"elastic"
+];
+var SS = {
+	x0: "ss",
+	x1: "ss",
+	y0: "ss",
+	y1: "ss"
+};
+var DOCK = [
+	"TRACE",
+	"FEM",
+	"CONVERGENCE",
+	"SUBPANELS",
+	"STIFFENERS",
+	"CODE",
+	"DESIGN",
+	"TRIAL ρ",
+	"CASES",
+	"VERIFY"
+];
+var VIEWS = [
+	{
+		id: "geometry",
+		label: "GEOMETRY"
+	},
+	{
+		id: "sx",
+		label: "σx"
+	},
+	{
+		id: "sy",
+		label: "σy"
+	},
+	{
+		id: "tau",
+		label: "τxy"
+	},
+	{
+		id: "combined",
+		label: "COMBINED"
+	},
+	{
+		id: "panels",
+		label: "SUBPANELS"
+	},
+	{
+		id: "mesh",
+		label: "MESH"
+	},
+	{
+		id: "prestress",
+		label: "PRE-BUCKLING"
+	},
+	{
+		id: "mode",
+		label: "BUCKLING MODE"
+	},
+	{
+		id: "effective",
+		label: "TRIAL ρ"
+	}
+];
+var STATUS = {
+	available: "AVAILABLE",
+	"data-required": "VERIFIED STANDARD DATA REQUIRED",
+	"not-applicable": "NOT APPLICABLE",
+	"out-of-scope": "OUTSIDE IMPLEMENTED SCOPE",
+	"source-required": "IMPLEMENTED — SOURCE VERIFICATION REQUIRED",
+	pass: "PASS",
+	fail: "FAIL",
+	"not-checked": "NOT CHECKED",
+	invalid: "INVALID INPUT"
+};
+var EDGE_FIELDS = [
+	{
+		key: "x0",
+		label: "Edge x = 0",
+		hot: "ex0"
+	},
+	{
+		key: "x1",
+		label: "Edge x = a",
+		hot: "ex1"
+	},
+	{
+		key: "y0",
+		label: "Edge y = 0",
+		hot: "ey0"
+	},
+	{
+		key: "y1",
+		label: "Edge y = b",
+		hot: "ey1"
+	}
+];
+function num(raw) {
+	const t = raw.trim();
+	if (!t) return null;
+	const n = Number(t);
+	return Number.isFinite(n) ? n : null;
+}
+function showEng(n) {
+	const abs = Math.abs(n);
+	if (abs !== 0 && (abs >= 1e5 || abs < 1e-3)) return n.toExponential(4);
+	const digits = abs >= 100 ? 2 : abs >= 10 ? 3 : abs >= 1 ? 4 : 6;
+	return trimNum(n, digits);
+}
+function show(n, digits = 3) {
+	if (n == null || !Number.isFinite(n)) return "—";
+	const abs = Math.abs(n);
+	if (abs !== 0 && (abs >= 1e5 || abs < .01)) return n.toExponential(3);
+	return trimNum(n, digits);
+}
+function showStep(raw) {
+	return raw.replace(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi, (token) => {
+		const value = Number(token);
+		return Number.isFinite(value) ? show(value, 4) : token;
+	});
+}
+function askWorker(job, timeoutMs) {
+	return new Promise((resolve, reject) => {
+		try {
+			const worker = new Worker(new URL("../plate/fem.worker.ts", import.meta.url), { type: "module" });
+			const timer = window.setTimeout(() => {
+				worker.terminate();
+				reject(/* @__PURE__ */ new Error("Solver timed out."));
+			}, timeoutMs);
+			worker.onmessage = (event) => {
+				window.clearTimeout(timer);
+				worker.terminate();
+				resolve(event.data);
+			};
+			worker.onerror = () => {
+				window.clearTimeout(timer);
+				worker.terminate();
+				reject(/* @__PURE__ */ new Error("Solver worker failed."));
+			};
+			worker.postMessage(job);
+		} catch (error) {
+			reject(error instanceof Error ? error : /* @__PURE__ */ new Error("Solver worker failed."));
+		}
+	});
+}
+function PlateTool() {
+	const [a, setA] = useState("2000");
+	const [b, setB] = useState("1000");
+	const [t, setT] = useState("10");
+	const [e, setE] = useState("210000");
+	const [nu, setNu] = useState("0.3");
+	const [fy, setFy] = useState("350");
+	const [fu, setFu] = useState("480");
+	const [s1, setS1] = useState("100");
+	const [psi, setPsi] = useState("1");
+	const [tau, setTau] = useState("0");
+	const [sy, setSy] = useState("0");
+	const [kr, setKr] = useState("0");
+	const [edges, setEdges] = useState({ ...SS });
+	const [hot, setHot] = useState(null);
+	const [view, setView] = useState("geometry");
+	const [designMethod, setDesignMethod] = useState("none");
+	const [design, setDesign] = useState({});
+	const [nx, setNx] = useState("12");
+	const [ny, setNy] = useState("12");
+	const [fem, setFem] = useState(null);
+	const [femKey, setFemKey] = useState("");
+	const [busy, setBusy] = useState("");
+	const [femError, setFemError] = useState("");
+	const [modeIndex, setModeIndex] = useState(0);
+	const [stiffeners, setStiffeners] = useState([]);
+	const [seq, setSeq] = useState(1);
+	const [selectedStiffener, setSelectedStiffener] = useState(null);
+	const [selectedPanel, setSelectedPanel] = useState(null);
+	const [panelSort, setPanelSort] = useState("id");
+	const [patchOn, setPatchOn] = useState(false);
+	const [patchEdge, setPatchEdge] = useState("y1");
+	const [patchF, setPatchF] = useState("10000");
+	const [patchSs, setPatchSs] = useState("250");
+	const [patchAt, setPatchAt] = useState("1000");
+	const [lengthUnit, setLengthUnit] = useState("mm");
+	const [stressUnit, setStressUnit] = useState("MPa");
+	const [forceUnit, setForceUnit] = useState("N");
+	const [convTol, setConvTol] = useState("1");
+	const [rho, setRho] = useState("");
+	const [study, setStudy] = useState(null);
+	const [studyKey, setStudyKey] = useState("");
+	const [verifyRows, setVerifyRows] = useState(null);
+	const [cases, setCases] = useState([]);
+	const [casesReady, setCasesReady] = useState(false);
+	const [caseName, setCaseName] = useState("CASE A");
+	const [leftOpen, setLeftOpen] = useState(true);
+	const [rightOpen, setRightOpen] = useState(true);
+	const [as4100Sheet, setAs4100Sheet] = useState("AS 4100 plate check not started. Elastic σcr is not a design resistance.");
+	const [dock, setDock] = useState("TRACE");
+	useEffect(() => {
+		try {
+			const raw = localStorage.getItem("iq-cal-plb-cases");
+			if (raw) {
+				const parsed = JSON.parse(raw);
+				if (Array.isArray(parsed)) setCases(parsed);
+			}
+		} catch {}
+		setCasesReady(true);
+	}, []);
+	useEffect(() => {
+		if (!casesReady) return;
+		localStorage.setItem("iq-cal-plb-cases", JSON.stringify(cases));
+	}, [cases, casesReady]);
+	const toLen = (raw) => {
+		const n = num(raw);
+		return n == null ? null : lengthToMm(n, lengthUnit);
+	};
+	const toStress = (raw) => {
+		const n = num(raw);
+		return n == null ? null : stressToMpa(n, stressUnit);
+	};
+	const toForce = (raw) => {
+		const n = num(raw);
+		return n == null ? null : forceToN(n, forceUnit);
+	};
+	const parsed = {
+		aMm: toLen(a),
+		bMm: toLen(b),
+		tMm: toLen(t),
+		eMpa: toStress(e),
+		nu: num(nu),
+		fyMpa: toStress(fy),
+		fuMpa: toStress(fu),
+		sigma1Mpa: toStress(s1) ?? 0,
+		psi: num(psi) ?? 1,
+		tauMpa: toStress(tau) ?? 0,
+		sigmaYMpa: toStress(sy) ?? 0,
+		kr: num(kr) == null ? 0 : stiffnessToNPerMm(num(kr) ?? 0, forceUnit, lengthUnit)
+	};
+	const nxN = Math.round(num(nx) ?? 0);
+	const nyN = Math.round(num(ny) ?? 0);
+	const result = useMemo(() => {
+		const { aMm, bMm, tMm, eMpa, nu: nuValue, fyMpa, fuMpa } = parsed;
+		if (aMm == null || bMm == null || tMm == null || eMpa == null || nuValue == null || fyMpa == null || fuMpa == null) return null;
+		return classicalPlate({
+			aMm,
+			bMm,
+			tMm,
+			eMpa,
+			nu: nuValue,
+			fyMpa,
+			fuMpa,
+			sigma1Mpa: parsed.sigma1Mpa,
+			psi: parsed.psi,
+			tauMpa: parsed.tauMpa,
+			edges
+		});
+	}, [
+		a,
+		b,
+		t,
+		e,
+		nu,
+		fy,
+		fu,
+		s1,
+		psi,
+		tau,
+		edges,
+		lengthUnit,
+		stressUnit,
+		forceUnit
+	]);
+	const panels = useMemo(() => {
+		const { aMm, bMm, tMm, eMpa, nu: nuValue, fyMpa, fuMpa } = parsed;
+		if (aMm == null || bMm == null || tMm == null || eMpa == null || nuValue == null || fyMpa == null || fuMpa == null) return [];
+		return buildPanels({
+			aMm,
+			bMm,
+			tMm,
+			eMpa,
+			nu: nuValue,
+			fyMpa,
+			fuMpa,
+			sigma1Mpa: parsed.sigma1Mpa,
+			psi: parsed.psi,
+			tauMpa: parsed.tauMpa,
+			edges,
+			stiffeners
+		});
+	}, [
+		a,
+		b,
+		t,
+		e,
+		nu,
+		fy,
+		fu,
+		s1,
+		psi,
+		tau,
+		edges,
+		stiffeners,
+		lengthUnit,
+		stressUnit,
+		forceUnit
+	]);
+	const meshPreview = useMemo(() => {
+		if (parsed.aMm == null || parsed.bMm == null || nxN < 2 || nyN < 2 || nxN > 80 || nyN > 80) return [];
+		const forceN = toForce(patchF);
+		const lengthMm = toLen(patchSs);
+		const atMm = toLen(patchAt);
+		const xCuts = stiffeners.filter((item) => item.axis === "y").map((item) => item.atMm);
+		const yCuts = stiffeners.filter((item) => item.axis === "x").map((item) => item.atMm);
+		if (patchOn && forceN != null && lengthMm != null && atMm != null && lengthMm > 0) {
+			const cuts = [atMm - lengthMm / 2, atMm + lengthMm / 2];
+			if (patchEdge === "y0" || patchEdge === "y1") xCuts.push(...cuts);
+			else yCuts.push(...cuts);
+		}
+		return previewMesh(parsed.aMm, parsed.bMm, nxN, nyN, xCuts, yCuts);
+	}, [
+		a,
+		b,
+		nxN,
+		nyN,
+		stiffeners,
+		patchOn,
+		patchEdge,
+		patchF,
+		patchSs,
+		patchAt,
+		lengthUnit,
+		forceUnit
+	]);
+	const key = JSON.stringify({
+		parsed,
+		edges,
+		nx,
+		ny,
+		stiffeners,
+		rho,
+		patchOn,
+		patchEdge,
+		patchF,
+		patchSs,
+		patchAt
+	});
+	const stale = fem != null && femKey !== key;
+	const studyStale = study != null && studyKey !== key;
+	const liveFem = fem?.ok && !stale ? fem : null;
+	const modeClass = useMemo(() => {
+		const mode = liveFem?.modes[modeIndex] ?? liveFem?.modes[0];
+		if (!liveFem || !mode || mode.w.length === 0) return null;
+		return classifyMode(mode.w, liveFem.xs, liveFem.ys, panels);
+	}, [
+		liveFem,
+		modeIndex,
+		panels
+	]);
+	const previewAspect = parsed.aMm && parsed.bMm && nxN >= 2 && nyN >= 2 ? Math.max(parsed.aMm / nxN, parsed.bMm / nyN) / Math.min(parsed.aMm / nxN, parsed.bMm / nyN) : null;
+	const rhoN = num(rho);
+	const plateKg = parsed.aMm && parsed.bMm && parsed.tMm ? plateMassKg(parsed.aMm, parsed.bMm, parsed.tMm) : 0;
+	const stiffKg = stiffeners.reduce((sum, item) => {
+		const props = parsed.tMm ? stiffenerProps(item, parsed.tMm) : null;
+		const length = item.axis === "x" ? parsed.aMm ?? 0 : parsed.bMm ?? 0;
+		return sum + stiffenerMassKg(props?.areaMm2 ?? 0, length);
+	}, 0);
+	const codeRows = useMemo(() => {
+		if (parsed.aMm == null || parsed.bMm == null || parsed.tMm == null || parsed.fyMpa == null) return [];
+		const allSs = edges.x0 === "ss" && edges.x1 === "ss" && edges.y0 === "ss" && edges.y1 === "ss";
+		return designChecks(designMethod, {
+			aMm: parsed.aMm,
+			bMm: parsed.bMm,
+			tMm: parsed.tMm,
+			fyMpa: parsed.fyMpa,
+			edgesSimplySupported: allSs,
+			stiffenerCount: stiffeners.length,
+			hasPatch: patchOn,
+			design
+		});
+	}, [
+		a,
+		b,
+		t,
+		fy,
+		edges,
+		stiffeners.length,
+		lengthUnit,
+		stressUnit,
+		designMethod,
+		patchOn,
+		design
+	]);
+	const rhoPreview = rhoN != null && rhoN > 0 && rhoN < 1 ? rhoN : null;
+	const sortedPanels = [...panels].sort((p, q) => {
+		if (panelSort === "stress") return (p.sigmaCrMpa ?? 0xe8d4a51000) - (q.sigmaCrMpa ?? 0xe8d4a51000);
+		return p.id.localeCompare(q.id, void 0, { numeric: true });
+	});
+	function editDirect(setter) {
+		return (value) => setter(value);
+	}
+	function livePatch() {
+		if (!patchOn) return null;
+		const forceN = toForce(patchF);
+		const lengthMm = toLen(patchSs);
+		const atMm = toLen(patchAt);
+		if (forceN == null || lengthMm == null || atMm == null) return null;
+		return {
+			edge: patchEdge,
+			atMm,
+			lengthMm,
+			forceN
+		};
+	}
+	function rescale(raw, convert) {
+		const n = num(raw);
+		return n == null ? raw : formatEntry(convert(n));
+	}
+	function onLengthUnit(next) {
+		if (next === lengthUnit) return;
+		const scale = (raw) => rescale(raw, (value) => mmToLength(lengthToMm(value, lengthUnit), next));
+		setA(scale(a));
+		setB(scale(b));
+		setT(scale(t));
+		setPatchSs(scale(patchSs));
+		setPatchAt(scale(patchAt));
+		const spring = num(kr);
+		if (spring != null) setKr(formatEntry(nPerMmToStiffness(stiffnessToNPerMm(spring, forceUnit, lengthUnit), forceUnit, next)));
+		setLengthUnit(next);
+	}
+	function onStressUnit(next) {
+		if (next === stressUnit) return;
+		const scale = (raw) => rescale(raw, (value) => mpaToStress(stressToMpa(value, stressUnit), next));
+		setE(scale(e));
+		setFy(scale(fy));
+		setFu(scale(fu));
+		setS1(scale(s1));
+		setTau(scale(tau));
+		setSy(scale(sy));
+		setStressUnit(next);
+	}
+	function onForceUnit(next) {
+		if (next === forceUnit) return;
+		const load = num(patchF);
+		if (load != null) setPatchF(formatEntry(nToForce(forceToN(load, forceUnit), next)));
+		const spring = num(kr);
+		if (spring != null) setKr(formatEntry(nPerMmToStiffness(stiffnessToNPerMm(spring, forceUnit, lengthUnit), next, lengthUnit)));
+		setForceUnit(next);
+	}
+	const patchIssue = (() => {
+		if (!patchOn) return "";
+		const patch = livePatch();
+		if (!patch || parsed.aMm == null || parsed.bMm == null) return "Patch force, loaded length and position must be numbers.";
+		const interval = patchInterval(patch, patch.edge === "x0" || patch.edge === "x1" ? parsed.bMm : parsed.aMm);
+		return typeof interval === "string" ? interval : "";
+	})();
+	const patchForce = patchOn ? toForce(patchF) ?? 0 : 0;
+	const compressiveEdge = Math.max(parsed.sigma1Mpa, parsed.sigma1Mpa * parsed.psi, parsed.sigmaYMpa);
+	const tensileField = Math.abs(parsed.tauMpa) <= 1e-9 && !(patchForce > 0) && compressiveEdge <= 1e-9 && (Math.abs(parsed.sigma1Mpa) > 1e-9 || Math.abs(parsed.sigmaYMpa) > 1e-9 || patchForce < 0);
+	function applyPreset(id) {
+		const clear = () => {
+			setPatchOn(false);
+			setEdges({ ...SS });
+			setStiffeners([]);
+			setSy(formatEntry(mpaToStress(0, stressUnit)));
+		};
+		const L = (mm) => formatEntry(mmToLength(mm, lengthUnit));
+		const S = (mpa) => formatEntry(mpaToStress(mpa, stressUnit));
+		if (id === "A") {
+			setA(L(1e3));
+			setB(L(1e3));
+			setT(L(10));
+			setS1(S(100));
+			setPsi("1");
+			setTau(S(0));
+			clear();
+			return;
+		}
+		if (id === "B") {
+			setA(L(800));
+			setB(L(800));
+			setT(L(8));
+			setS1(S(0));
+			setPsi("1");
+			setTau(S(40));
+			clear();
+			return;
+		}
+		if (id === "C") {
+			setA(L(5e3));
+			setB(L(1e3));
+			setT(L(10));
+			setS1(S(100));
+			setPsi("-1");
+			setTau(S(0));
+			clear();
+			setView("sx");
+			return;
+		}
+		if (id === "D") {
+			setA(L(4e3));
+			setB(L(1e3));
+			setT(L(10));
+			setS1(S(100));
+			setPsi("1");
+			setTau(S(0));
+			clear();
+			return;
+		}
+	}
+	function addStiffener(axis) {
+		const id = `S${seq}`;
+		const at = axis === "x" ? (parsed.bMm ?? 1e3) / 2 : (parsed.aMm ?? 2e3) / 2;
+		setSeq(seq + 1);
+		setStiffeners((list) => [...list, newStiffener({
+			id,
+			axis,
+			atMm: at
+		})]);
+		setSelectedStiffener(id);
+		setDock("STIFFENERS");
+	}
+	function femInput() {
+		const { aMm, bMm, tMm, eMpa, nu: nuValue } = parsed;
+		if (aMm == null || bMm == null || tMm == null || eMpa == null || nuValue == null) return null;
+		if (!(aMm > 0) || !(bMm > 0) || !(tMm > 0) || !(eMpa > 0) || !(nuValue > 0 && nuValue < .5)) return null;
+		if (nxN < 2 || nyN < 2 || nxN > 80 || nyN > 80) return null;
+		return {
+			aMm,
+			bMm,
+			tMm,
+			eMpa,
+			nu: nuValue,
+			sigma1Mpa: parsed.sigma1Mpa,
+			psi: parsed.psi,
+			tauMpa: parsed.tauMpa,
+			sigmaYMpa: parsed.sigmaYMpa,
+			patchLoad: livePatch() ?? void 0,
+			nx: nxN,
+			ny: nyN,
+			edges,
+			krNPerRadPerMm: parsed.kr,
+			stiffeners: stiffeners.map((item) => {
+				const props = stiffenerProps(item, tMm);
+				return {
+					id: item.id,
+					axis: item.axis,
+					atMm: item.atMm,
+					eiNmm2: props.eiNmm2,
+					gjNmm2: props.gjNmm2,
+					areaMm2: props.areaMm2,
+					rigid: item.rigid
+				};
+			}),
+			modes: 5,
+			shapes: true
+		};
+	}
+	async function runFem() {
+		const input = femInput();
+		if (!input) {
+			setFemError("FEM needs positive a, b, t, E, ν and a mesh from 2×2 to 80×80.");
+			return;
+		}
+		setBusy("SOLVING");
+		setFemError("");
+		setDock("FEM");
+		setView("mode");
+		try {
+			const value = (await askWorker({
+				op: "solve",
+				input
+			}, 12e4))?.result;
+			if (!value) throw new Error("Solver returned no result.");
+			setFem(value);
+			setFemKey(key);
+			setModeIndex(0);
+			if (!value.ok) setFemError(value.reason);
+			else {
+				const cls = value.modes[0] ? classifyMode(value.modes[0].w, value.xs, value.ys, panels) : null;
+				if (cls?.panelId) setSelectedPanel(cls.panelId);
+			}
+		} catch (error) {
+			if (input.nx * input.ny <= 400) {
+				const value = solvePlateFem(input);
+				setFem(value);
+				setFemKey(key);
+				if (!value.ok) setFemError(value.reason);
+			} else setFemError(error instanceof Error ? error.message : "Solver failed.");
+		} finally {
+			setBusy("");
+		}
+	}
+	async function runStudy() {
+		const input = femInput();
+		if (!input || parsed.aMm == null || parsed.bMm == null) {
+			setFemError("Set the plate before a mesh study.");
+			return;
+		}
+		setBusy("CONVERGENCE");
+		setFemError("");
+		setDock("CONVERGENCE");
+		try {
+			const data = await askWorker({
+				op: "study",
+				input,
+				grids: studyGrids(parsed.aMm, parsed.bMm),
+				tolerance: Number(convTol) / 100
+			}, 18e4);
+			if (!data?.study) throw new Error("Mesh study returned nothing.");
+			setStudy(data.study);
+			setStudyKey(key);
+		} catch (error) {
+			setFemError(error instanceof Error ? error.message : "Mesh study failed.");
+		} finally {
+			setBusy("");
+		}
+	}
+	async function runVerify() {
+		setBusy("VERIFY");
+		setFemError("");
+		setDock("VERIFY");
+		try {
+			const data = await askWorker({ op: "verify" }, 18e4);
+			if (!data?.rows) throw new Error("Verification returned nothing.");
+			setVerifyRows(data.rows);
+		} catch (error) {
+			setFemError(error instanceof Error ? error.message : "Verification failed.");
+		} finally {
+			setBusy("");
+		}
+	}
+	async function runVerifyFull() {
+		setBusy("VERIFY");
+		setFemError("");
+		setDock("VERIFY");
+		try {
+			const data = await askWorker({ op: "verify-full" }, 18e4);
+			if (!data?.rows) throw new Error("Verification returned nothing.");
+			setVerifyRows(data.rows);
+		} catch (error) {
+			setFemError(error instanceof Error ? error.message : "Verification failed.");
+		} finally {
+			setBusy("");
+		}
+	}
+	function duplicateCase() {
+		const row = {
+			id: `${Date.now()}`,
+			name: caseName.trim() || `CASE ${cases.length + 1}`,
+			plateKg,
+			stiffKg,
+			totalKg: plateKg + stiffKg,
+			classicalMpa: result?.ok ? result.sigmaCrMpa : null,
+			femMpa: liveFem?.modes[0]?.sigma1CrMpa ?? liveFem?.modes[0]?.sigmaYCrMpa ?? liveFem?.modes[0]?.tauCrMpa ?? null,
+			patchCrN: liveFem?.modes[0]?.patchCrN ?? null,
+			mode: modeClass?.kind ?? (liveFem ? "Mode 1" : "—"),
+			utilisation: "—"
+		};
+		setCases((list) => [...list, row]);
+		setCaseName(`CASE ${String.fromCharCode(65 + (cases.length + 1) % 26)}`);
+		setDock("CASES");
+	}
+	function cycle(edge) {
+		setEdges((prev) => ({
+			...prev,
+			[edge]: CYCLE[(CYCLE.indexOf(prev[edge]) + 1) % CYCLE.length] ?? "ss"
+		}));
+	}
+	const desk = ["plateDesk", leftOpen && rightOpen ? "" : !leftOpen && !rightOpen ? "bothOff" : !leftOpen ? "leftOff" : "rightOff"].filter(Boolean).join(" ");
+	const critical = liveFem?.modes[0];
+	const solvedRows = study?.rows.filter((row) => row.criticalMpa != null) ?? [];
+	const lastChange = [...solvedRows].reverse().find((row) => row.changePct != null)?.changePct ?? null;
+	const tolPct = Number(convTol);
+	const converged = study != null && !studyStale && solvedRows.length >= 2 && lastChange != null && Math.abs(lastChange) < tolPct;
+	const stressOut = (mpa) => mpa == null || !Number.isFinite(mpa) ? "—" : `${showEng(mpaToStress(mpa, stressUnit))} ${stressUnit}`;
+	const forceOut = (n) => n == null || !Number.isFinite(n) ? "—" : `${showEng(nToForce(n, forceUnit))} ${forceUnit}`;
+	const directOn = Math.abs(parsed.sigma1Mpa) > 1e-9 || Math.abs(parsed.sigmaYMpa) > 1e-9;
+	const shearOn = Math.abs(parsed.tauMpa) > 1e-9;
+	const bothFields = directOn && shearOn;
+	const allSs = edges.x0 === "ss" && edges.x1 === "ss" && edges.y0 === "ss" && edges.y1 === "ss";
+	const analyticalKind = !result?.ok ? null : shearOn && !directOn && !patchOn ? "ANALYTICAL — APPROXIMATE/FIT" : allSs && !patchOn && !shearOn && Math.abs(parsed.psi - 1) < 1e-9 && Math.abs(parsed.sigmaYMpa) < 1e-9 ? "ANALYTICAL — EXACT FOR IMPLEMENTED IDEALISATION" : "ANALYTICAL — FOR THE IMPLEMENTED IDEALISATION";
+	const femKind = !liveFem ? stale ? "FEM — STALE" : "FEM — NOT RUN" : converged ? "FEM — CONVERGED" : study != null && !studyStale ? "FEM — NOT CONVERGED" : "FEM — SOLVED, MESH NOT VERIFIED";
+	const solverKind = !liveFem ? "NOT RUN" : liveFem.residual <= liveFem.solverTolerance ? "CONVERGED" : "SOLVED — RESIDUAL ABOVE TOLERANCE";
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsx("div", {
+			className: "presetRow",
+			children: [
+				["A", "TEST A SQUARE"],
+				["B", "TEST B SHEAR"],
+				["C", "TEST C BENDING"],
+				["D", "TEST D LONG"]
+			].map(([id, label]) => /* @__PURE__ */ jsx("button", {
+				type: "button",
+				className: "caseChip",
+				onClick: () => applyPreset(id),
+				children: label
+			}, id))
+		}),
+		/* @__PURE__ */ jsxs("div", {
+			className: "toolToolbar",
+			children: [/* @__PURE__ */ jsx("button", {
+				className: "toolBtn",
+				type: "button",
+				onClick: () => setLeftOpen((v) => !v),
+				children: leftOpen ? "HIDE INPUTS" : "SHOW INPUTS"
+			}), /* @__PURE__ */ jsx("button", {
+				className: "toolBtn",
+				type: "button",
+				onClick: () => setRightOpen((v) => !v),
+				children: rightOpen ? "HIDE RESULTS" : "SHOW RESULTS"
+			})]
+		}),
+		/* @__PURE__ */ jsxs("div", {
+			className: desk,
+			children: [
+				leftOpen ? /* @__PURE__ */ jsxs("div", {
+					className: "plateCol",
+					children: [
+						/* @__PURE__ */ jsxs("section", {
+							className: "toolPanel",
+							children: [
+								/* @__PURE__ */ jsx("h2", { children: "Geometry" }),
+								/* @__PURE__ */ jsx("p", {
+									className: "toolNote",
+									style: { marginTop: 0 },
+									children: "The solver stays in millimetres, newtons and MPa. Changing a unit rescales the numbers so the physical plate does not change."
+								}),
+								/* @__PURE__ */ jsxs("div", {
+									className: "fieldGrid compact",
+									children: [
+										/* @__PURE__ */ jsxs("label", {
+											className: "field",
+											children: [/* @__PURE__ */ jsx("span", { children: "Length" }), /* @__PURE__ */ jsx("select", {
+												className: "toolSelect",
+												value: lengthUnit,
+												onChange: (event) => onLengthUnit(event.target.value),
+												children: LENGTH_UNITS.map((unit) => /* @__PURE__ */ jsx("option", {
+													value: unit,
+													children: unit
+												}, unit))
+											})]
+										}),
+										/* @__PURE__ */ jsxs("label", {
+											className: "field",
+											children: [/* @__PURE__ */ jsx("span", { children: "Stress / E" }), /* @__PURE__ */ jsx("select", {
+												className: "toolSelect",
+												value: stressUnit,
+												onChange: (event) => onStressUnit(event.target.value),
+												children: STRESS_UNITS.map((unit) => /* @__PURE__ */ jsx("option", {
+													value: unit,
+													children: unit
+												}, unit))
+											})]
+										}),
+										/* @__PURE__ */ jsxs("label", {
+											className: "field",
+											children: [/* @__PURE__ */ jsx("span", { children: "Force" }), /* @__PURE__ */ jsx("select", {
+												className: "toolSelect",
+												value: forceUnit,
+												onChange: (event) => onForceUnit(event.target.value),
+												children: FORCE_UNITS.map((unit) => /* @__PURE__ */ jsx("option", {
+													value: unit,
+													children: unit
+												}, unit))
+											})]
+										}),
+										/* @__PURE__ */ jsx(Field, {
+											label: `a — ${lengthUnit}`,
+											value: a,
+											onChange: setA,
+											hot: "a",
+											setHot
+										}),
+										/* @__PURE__ */ jsx(Field, {
+											label: `b — ${lengthUnit}`,
+											value: b,
+											onChange: setB,
+											hot: "b",
+											setHot
+										}),
+										/* @__PURE__ */ jsx(Field, {
+											label: `t — ${lengthUnit}`,
+											value: t,
+											onChange: setT,
+											hot: "t",
+											setHot
+										})
+									]
+								})
+							]
+						}),
+						/* @__PURE__ */ jsxs("section", {
+							className: "toolPanel",
+							children: [
+								/* @__PURE__ */ jsx("h2", { children: "Material" }),
+								/* @__PURE__ */ jsx("p", {
+									className: "toolNote",
+									style: { marginTop: 0 },
+									children: "Enter E, ν, fy and fu. No steel-grade table is embedded."
+								}),
+								/* @__PURE__ */ jsxs("div", {
+									className: "fieldGrid compact",
+									children: [
+										/* @__PURE__ */ jsx(Field, {
+											label: `E — ${stressUnit}`,
+											value: e,
+											onChange: setE
+										}),
+										/* @__PURE__ */ jsx(Field, {
+											label: "ν",
+											value: nu,
+											onChange: setNu
+										}),
+										/* @__PURE__ */ jsx(Field, {
+											label: `fy — ${stressUnit}`,
+											value: fy,
+											onChange: setFy
+										}),
+										/* @__PURE__ */ jsx(Field, {
+											label: `fu — ${stressUnit}`,
+											value: fu,
+											onChange: setFu
+										})
+									]
+								})
+							]
+						}),
+						/* @__PURE__ */ jsxs("section", {
+							className: "toolPanel",
+							children: [/* @__PURE__ */ jsx("h2", { children: "Edges" }), /* @__PURE__ */ jsxs("div", {
+								className: "fieldGrid compact",
+								children: [EDGE_FIELDS.map((edge) => /* @__PURE__ */ jsxs("label", {
+									className: "field",
+									onMouseEnter: () => setHot(edge.hot),
+									onMouseLeave: () => setHot(null),
+									children: [/* @__PURE__ */ jsx("span", { children: edge.label }), /* @__PURE__ */ jsxs("select", {
+										className: "toolSelect",
+										value: edges[edge.key],
+										onChange: (event) => setEdges((prev) => ({
+											...prev,
+											[edge.key]: event.target.value
+										})),
+										children: [
+											/* @__PURE__ */ jsx("option", {
+												value: "ss",
+												children: "Simply supported"
+											}),
+											/* @__PURE__ */ jsx("option", {
+												value: "fixed",
+												children: "Fixed"
+											}),
+											/* @__PURE__ */ jsx("option", {
+												value: "free",
+												children: "Free"
+											}),
+											/* @__PURE__ */ jsx("option", {
+												value: "elastic",
+												children: "Elastic rotation"
+											})
+										]
+									})]
+								}, edge.key)), /* @__PURE__ */ jsx(Field, {
+									label: `kθ — ${forceUnit}/rad per ${lengthUnit}`,
+									value: kr,
+									onChange: setKr,
+									hint: "FEM rotational spring only. Canonical stiffness is N/mm."
+								})]
+							})]
+						}),
+						/* @__PURE__ */ jsxs("section", {
+							className: "toolPanel",
+							children: [/* @__PURE__ */ jsx("h2", { children: "Stress" }), /* @__PURE__ */ jsxs("div", {
+								className: "fieldGrid compact",
+								children: [
+									/* @__PURE__ */ jsx(Field, {
+										label: `σ1 at y = 0 — ${stressUnit}`,
+										value: s1,
+										onChange: editDirect(setS1),
+										hot: "sx",
+										setHot
+									}),
+									/* @__PURE__ */ jsx(Field, {
+										label: "ψ = σ2 / σ1",
+										value: psi,
+										onChange: editDirect(setPsi),
+										hot: "sx",
+										setHot
+									}),
+									/* @__PURE__ */ jsx(Field, {
+										label: `τxy — ${stressUnit}`,
+										value: tau,
+										onChange: editDirect(setTau),
+										hot: "tau",
+										setHot
+									}),
+									/* @__PURE__ */ jsx(Field, {
+										label: `σy — ${stressUnit}`,
+										value: sy,
+										onChange: editDirect(setSy),
+										hint: "Uniform. Positive is compression."
+									})
+								]
+							})]
+						}),
+						/* @__PURE__ */ jsxs("section", {
+							className: "toolPanel",
+							children: [
+								/* @__PURE__ */ jsx("h2", { children: "Patch load" }),
+								/* @__PURE__ */ jsxs("label", {
+									className: "field",
+									children: [/* @__PURE__ */ jsx("span", { children: "Patch load" }), /* @__PURE__ */ jsxs("select", {
+										className: "toolSelect",
+										value: patchOn ? "on" : "off",
+										onChange: (event) => {
+											setPatchOn(event.target.value === "on");
+											setView("geometry");
+										},
+										children: [/* @__PURE__ */ jsx("option", {
+											value: "off",
+											children: "Off"
+										}), /* @__PURE__ */ jsx("option", {
+											value: "on",
+											children: "On — edge traction"
+										})]
+									})]
+								}),
+								patchOn ? /* @__PURE__ */ jsxs(Fragment, { children: [
+									/* @__PURE__ */ jsx("p", {
+										className: "toolNote",
+										style: { marginTop: 0 },
+										children: "Uniform normal force on one edge. Positive pushes into the plate. This is the applied load, not a buckling resistance and not a code check. Eccentricity is not supported."
+									}),
+									/* @__PURE__ */ jsxs("div", {
+										className: "fieldGrid compact",
+										children: [
+											/* @__PURE__ */ jsxs("label", {
+												className: "field",
+												children: [/* @__PURE__ */ jsx("span", { children: "Loaded edge" }), /* @__PURE__ */ jsxs("select", {
+													className: "toolSelect",
+													value: patchEdge,
+													onChange: (event) => setPatchEdge(event.target.value),
+													children: [
+														/* @__PURE__ */ jsx("option", {
+															value: "y1",
+															children: "y = b"
+														}),
+														/* @__PURE__ */ jsx("option", {
+															value: "y0",
+															children: "y = 0"
+														}),
+														/* @__PURE__ */ jsx("option", {
+															value: "x0",
+															children: "x = 0"
+														}),
+														/* @__PURE__ */ jsx("option", {
+															value: "x1",
+															children: "x = a"
+														})
+													]
+												})]
+											}),
+											/* @__PURE__ */ jsx(Field, {
+												label: `F — ${forceUnit}`,
+												value: patchF,
+												onChange: setPatchF,
+												hint: "Compression into the plate is positive."
+											}),
+											/* @__PURE__ */ jsx(Field, {
+												label: `ss — ${lengthUnit}`,
+												value: patchSs,
+												onChange: setPatchSs,
+												hint: "Loaded length. 1 kN/m = 1 N/mm."
+											}),
+											/* @__PURE__ */ jsx(Field, {
+												label: patchEdge === "x0" || patchEdge === "x1" ? `Centre y — ${lengthUnit}` : `Centre x — ${lengthUnit}`,
+												value: patchAt,
+												onChange: setPatchAt
+											})
+										]
+									}),
+									/* @__PURE__ */ jsx("p", {
+										className: "failBanner",
+										children: "CODE PATCH RESISTANCE: VERIFIED STANDARD DATA REQUIRED"
+									}),
+									/* @__PURE__ */ jsx("p", {
+										className: "toolNote",
+										children: "ECCENTRIC PATCH — NOT IMPLEMENTED. POINT FORCE — NOT IMPLEMENTED. NON-UNIFORM PATCH DISTRIBUTION — NOT IMPLEMENTED. GMNIA — NOT IMPLEMENTED."
+									}),
+									patchIssue ? /* @__PURE__ */ jsxs("p", {
+										className: "failBanner",
+										children: [patchIssue, " The eigenvalue will not run on this patch."]
+									}) : null,
+									/* @__PURE__ */ jsx("p", {
+										className: "toolNote",
+										children: "The FEM uses a plane-stress pre-buckling solve. λ·F is an elastic critical force, not a design resistance. Distribution is uniform. A point force is not offered."
+									})
+								] }) : /* @__PURE__ */ jsx("p", {
+									className: "toolNote",
+									children: "No patch. The membrane field is the σx, σy and τxy you enter. ECCENTRIC PATCH — NOT IMPLEMENTED. POINT FORCE — NOT IMPLEMENTED. NON-UNIFORM PATCH DISTRIBUTION — NOT IMPLEMENTED. GMNIA — NOT IMPLEMENTED."
+								})
+							]
+						}),
+						/* @__PURE__ */ jsx(StiffenerEditor, {
+							items: stiffeners,
+							selected: selectedStiffener,
+							onSelect: (id) => {
+								setSelectedStiffener(id);
+								setHot(id);
+							},
+							onHot: setHot,
+							onAdd: addStiffener,
+							onChange: setStiffeners,
+							onSeq: () => {
+								const id = `S${seq}`;
+								setSeq(seq + 1);
+								return id;
+							},
+							lengthUnit,
+							stressUnit
+						})
+					]
+				}) : null,
+				/* @__PURE__ */ jsxs("section", {
+					className: "toolPanel plateStage",
+					children: [
+						/* @__PURE__ */ jsx("div", {
+							className: "toolTabs",
+							role: "tablist",
+							children: VIEWS.map((item) => /* @__PURE__ */ jsx("button", {
+								type: "button",
+								className: view === item.id ? "on" : "",
+								onClick: () => setView(item.id),
+								children: item.label
+							}, item.id))
+						}),
+						view === "mode" ? /* @__PURE__ */ jsx(ModeView, {
+							xs: liveFem?.xs ?? [],
+							ys: liveFem?.ys ?? [],
+							modes: liveFem?.modes ?? [],
+							modeIndex,
+							onMode: setModeIndex
+						}) : /* @__PURE__ */ jsx("div", {
+							className: "drawingFrame jointFrame",
+							children: /* @__PURE__ */ jsx(PlateDrawing, {
+								aMm: parsed.aMm ?? 1,
+								bMm: parsed.bMm ?? 1,
+								tMm: parsed.tMm ?? 1,
+								sigma1: parsed.sigma1Mpa,
+								psi: parsed.psi,
+								tau: parsed.tauMpa,
+								sigmaY: parsed.sigmaYMpa,
+								edges,
+								hot,
+								view,
+								mesh: liveFem?.mesh ?? meshPreview,
+								xs: liveFem?.xs ?? [],
+								ys: liveFem?.ys ?? [],
+								membrane: liveFem?.membrane ?? null,
+								onEdge: cycle,
+								onHot: setHot,
+								stiffeners: stiffeners.map((item) => ({
+									id: item.id,
+									axis: item.axis,
+									atMm: item.atMm
+								})),
+								panels: panels.map((panel) => ({
+									id: panel.id,
+									x0: panel.x0,
+									x1: panel.x1,
+									y0: panel.y0,
+									y1: panel.y1
+								})),
+								selectedStiffener,
+								selectedPanel: selectedPanel ?? modeClass?.panelId ?? null,
+								onStiffener: (id) => {
+									setSelectedStiffener(id);
+									setDock("STIFFENERS");
+								},
+								onPanel: (id) => {
+									setSelectedPanel(id);
+									setDock("SUBPANELS");
+									setView("panels");
+								},
+								onDragStiffener: (id, atMm) => setStiffeners((list) => list.map((item) => item.id === id ? {
+									...item,
+									atMm: Math.round(atMm * 10) / 10
+								} : item)),
+								patch: livePatch(),
+								effectiveRho: view === "effective" ? rhoPreview : null
+							})
+						}),
+						view === "sy" && Math.abs(parsed.sigmaYMpa) < 1e-9 && !patchOn ? /* @__PURE__ */ jsx("p", {
+							className: "toolNote",
+							children: "No uniform σy. A patch load is a separate edge traction; its membrane stress is calculated in the FEM, not drawn as a stress block."
+						}) : null,
+						view === "effective" ? /* @__PURE__ */ jsx("p", {
+							className: "toolNote",
+							children: "The hatch is a trial ρ preview. It is not an AS 4100 effective width."
+						}) : null
+					]
+				}),
+				rightOpen ? /* @__PURE__ */ jsxs("div", {
+					className: "plateCol",
+					children: [/* @__PURE__ */ jsxs("section", {
+						className: "toolPanel",
+						children: [
+							/* @__PURE__ */ jsx("h2", { children: "Governing" }),
+							!result ? /* @__PURE__ */ jsx("p", {
+								className: "failBanner",
+								children: "Enter positive a, b, t, E, ν, fy and fu."
+							}) : null,
+							result && !result.ok ? /* @__PURE__ */ jsx("p", {
+								className: "failBanner",
+								children: result.reason
+							}) : null,
+							/* @__PURE__ */ jsxs("div", {
+								className: "resultList",
+								children: [
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "α = a/b" }), /* @__PURE__ */ jsx("b", { children: result?.ok ? show(result.alpha, 3) : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "CLASSICAL COMPRESSION BUCKLING σcr" }), /* @__PURE__ */ jsx("b", { children: result?.ok ? stressOut(result.sigmaCrMpa) : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "CLASSICAL SHEAR BUCKLING τcr" }), /* @__PURE__ */ jsx("b", { children: result?.ok ? stressOut(result.tauCrMpa) : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Half-waves m × n" }), /* @__PURE__ */ jsx("b", { children: result?.ok && result.m != null ? `${result.m} × ${result.n}` : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: bothFields ? "FEM COMBINED-PRESTRESS λcr" : "FEM λ1" }), /* @__PURE__ */ jsx("b", { children: critical ? show(critical.lambda, 4) : fem ? "—" : "Not run" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "FEM σ1 at y = 0" }), /* @__PURE__ */ jsx("b", { children: stressOut(critical?.sigma1CrMpa) })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "FEM σy,cr" }), /* @__PURE__ */ jsx("b", { children: stressOut(critical?.sigmaYCrMpa) })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "FEM τcr" }), /* @__PURE__ */ jsx("b", { children: stressOut(critical?.tauCrMpa) })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "FEM patch Fcr" }), /* @__PURE__ */ jsx("b", { children: forceOut(critical?.patchCrN) })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Plate mass" }), /* @__PURE__ */ jsxs("b", { children: [show(plateKg, 2), " kg"] })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Stiffener mass" }), /* @__PURE__ */ jsxs("b", { children: [show(stiffKg, 2), " kg"] })] })
+								]
+							}),
+							bothFields ? /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: "NO CLASSICAL INTERACTION CHECK IMPLEMENTED. σcr and τcr stay separate. λcr is an elastic bifurcation multiplier on the combined reference field, not a code design utilisation."
+							}) : null,
+							patchOn || Math.abs(parsed.sigmaYMpa) > 1e-9 ? /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: "Classical σcr and τcr do not include σy or the patch. There is no closed form for that combination. Use the FEM column."
+							}) : null,
+							Math.abs(parsed.tauMpa) < 1e-9 && result?.ok && result.tauCrMpa != null ? /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: "Classical τcr is the simply-supported plate property. Applied τxy is zero, so that number is not this load case. APPROXIMATE / FIT — not an exact series."
+							}) : null,
+							Math.abs(parsed.tauMpa) >= 1e-9 && result?.ok && result.tauCrMpa != null ? /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: "CLASSICAL SHEAR BUCKLING uses the Timoshenko kτ fit. APPROXIMATE / FIT — not an exact closed form. It is not a combined utilisation."
+							}) : null,
+							tensileField ? /* @__PURE__ */ jsx("p", {
+								className: "failBanner",
+								children: "The direct field is tensile. Classical σcr is not a capacity for this load, and the eigenvalue is refused."
+							}) : null,
+							critical?.sigma1CrMpa != null && critical.sigma1CrMpa < 0 ? /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: "σ1 at λ is tensile at y = 0. Read it with ψ. It is not a compressive capacity of that edge."
+							}) : null,
+							stale ? /* @__PURE__ */ jsx("p", {
+								className: "failBanner",
+								children: "STALE — INPUTS CHANGED. RUN FEM AGAIN."
+							}) : null,
+							modeClass ? /* @__PURE__ */ jsxs("p", {
+								className: "okBanner",
+								children: [modeClass.kind, modeClass.panelId ? ` · ${modeClass.panelId}` : ""]
+							}) : null,
+							modeClass ? /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: modeClass.note
+							}) : null,
+							/* @__PURE__ */ jsxs("div", {
+								className: "resultList",
+								children: [
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Mesh" }), /* @__PURE__ */ jsx("b", { children: liveFem ? `${liveFem.nx} × ${liveFem.ny}` : nxN >= 2 && nyN >= 2 ? `${nxN} × ${nyN}` : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "DOF" }), /* @__PURE__ */ jsx("b", { children: liveFem ? liveFem.freeDof : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Eigenpair residual" }), /* @__PURE__ */ jsx("b", { children: liveFem ? liveFem.residual.toExponential(2) : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Solver tolerance" }), /* @__PURE__ */ jsx("b", { children: liveFem ? liveFem.solverTolerance.toExponential(0) : "1e-8" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Iterations" }), /* @__PURE__ */ jsx("b", { children: liveFem ? liveFem.iterations : "—" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Element aspect" }), /* @__PURE__ */ jsx("b", { children: liveFem ? show(liveFem.elementAspect, 2) : previewAspect == null ? "—" : show(previewAspect, 2) })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Last mesh change" }), /* @__PURE__ */ jsx("b", { children: lastChange == null || studyStale ? "—" : `${show(lastChange, 2)}%` })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Mesh status" }), /* @__PURE__ */ jsx("b", { children: study == null ? "NOT CHECKED" : studyStale ? "NOT CHECKED" : converged ? "CONVERGED" : "NOT CONVERGED" })] }),
+									/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Solver status" }), /* @__PURE__ */ jsx("b", { children: solverKind })] })
+								]
+							}),
+							/* @__PURE__ */ jsxs("p", {
+								className: "toolNote",
+								children: [
+									analyticalKind,
+									". ",
+									femKind,
+									". ",
+									as4100Sheet,
+									" This sheet is not a design certificate."
+								]
+							}),
+							converged ? /* @__PURE__ */ jsxs("p", {
+								className: "okBanner",
+								children: [
+									"CONVERGED — last two meshes within ",
+									tolPct,
+									"%. This is a mesh check, not a code verification."
+								]
+							}) : /* @__PURE__ */ jsx("p", {
+								className: study == null ? "toolNote" : "failBanner",
+								children: study == null ? `MESH CONVERGENCE NOT RUN. An FEM result is not verified until the last two meshes agree within ${tolPct}%.` : studyStale ? "CONVERGENCE STALE" : `NOT CONVERGED — last change is outside ${tolPct}%.`
+							}),
+							result?.ok ? result.warnings.map((line) => /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: line
+							}, line)) : null,
+							liveFem?.aspectWarning ? /* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: liveFem.aspectWarning
+							}) : null,
+							previewAspect != null && previewAspect > 3 ? /* @__PURE__ */ jsxs("p", {
+								className: "toolNote",
+								children: [
+									"Preview element aspect ",
+									previewAspect.toFixed(2),
+									" is above 3. Add elements on the long side."
+								]
+							}) : null
+						]
+					}), /* @__PURE__ */ jsxs("section", {
+						className: "toolPanel",
+						children: [
+							/* @__PURE__ */ jsx("h2", { children: "Mesh" }),
+							/* @__PURE__ */ jsx("div", {
+								className: "presetRow",
+								children: [
+									10,
+									20,
+									40,
+									80
+								].map((n) => /* @__PURE__ */ jsxs("button", {
+									type: "button",
+									className: nxN === n && nyN === n ? "caseChip on" : "caseChip",
+									onClick: () => {
+										setNx(String(n));
+										setNy(String(n));
+									},
+									children: [
+										n,
+										"×",
+										n
+									]
+								}, n))
+							}),
+							/* @__PURE__ */ jsxs("div", {
+								className: "fieldGrid compact",
+								children: [/* @__PURE__ */ jsx(Field, {
+									label: "Elements along a",
+									value: nx,
+									onChange: setNx
+								}), /* @__PURE__ */ jsx(Field, {
+									label: "Elements along b",
+									value: ny,
+									onChange: setNy
+								})]
+							}),
+							/* @__PURE__ */ jsx("p", {
+								className: "toolNote",
+								children: nxN >= 2 && nyN >= 2 && nxN <= 80 && nyN <= 80 ? `${nxN * nyN} elements · ${(nxN + 1) * (nyN + 1)} nodes · ${(nxN + 1) * (nyN + 1) * 3} DOF` : "Mesh must be from 2×2 to 80×80."
+							}),
+							/* @__PURE__ */ jsxs("label", {
+								className: "field",
+								children: [/* @__PURE__ */ jsx("span", { children: "Convergence tolerance" }), /* @__PURE__ */ jsxs("select", {
+									className: "toolSelect",
+									value: convTol,
+									onChange: (event) => setConvTol(event.target.value),
+									children: [
+										/* @__PURE__ */ jsx("option", {
+											value: "2",
+											children: "2%"
+										}),
+										/* @__PURE__ */ jsx("option", {
+											value: "1",
+											children: "1%"
+										}),
+										/* @__PURE__ */ jsx("option", {
+											value: "0.5",
+											children: "0.5%"
+										})
+									]
+								})]
+							}),
+							/* @__PURE__ */ jsxs("div", {
+								className: "toolToolbar",
+								children: [
+									/* @__PURE__ */ jsx("button", {
+										className: "toolBtn",
+										type: "button",
+										disabled: busy !== "",
+										onClick: runFem,
+										children: busy === "SOLVING" ? "SOLVING" : "RUN FEM"
+									}),
+									/* @__PURE__ */ jsx("button", {
+										className: "toolBtn",
+										type: "button",
+										disabled: busy !== "",
+										onClick: runStudy,
+										children: busy === "CONVERGENCE" ? "RUNNING" : "RUN MESH CONVERGENCE"
+									}),
+									/* @__PURE__ */ jsx("button", {
+										className: "toolBtn",
+										type: "button",
+										disabled: busy !== "",
+										onClick: runVerify,
+										children: busy === "VERIFY" ? "RUNNING" : "RUN QUICK VERIFICATION"
+									}),
+									/* @__PURE__ */ jsx("button", {
+										className: "toolBtn",
+										type: "button",
+										disabled: busy !== "",
+										onClick: runVerifyFull,
+										children: busy === "VERIFY" ? "RUNNING" : "RUN FULL VERIFICATION"
+									})
+								]
+							}),
+							femError ? /* @__PURE__ */ jsx("p", {
+								className: "failBanner",
+								children: femError
+							}) : null
+						]
+					})]
+				}) : null
+			]
+		}),
+		/* @__PURE__ */ jsxs("section", {
+			className: "toolPanel plateBottom",
+			children: [
+				/* @__PURE__ */ jsx("div", {
+					className: "toolTabs",
+					role: "tablist",
+					children: DOCK.map((item) => /* @__PURE__ */ jsx("button", {
+						type: "button",
+						className: dock === item ? "on" : "",
+						onClick: () => setDock(item),
+						children: item
+					}, item))
+				}),
+				dock === "TRACE" ? /* @__PURE__ */ jsx(Trace, {
+					result,
+					fem: liveFem,
+					stiffeners,
+					plateT: parsed.tMm ?? 0
+				}) : null,
+				dock === "FEM" ? /* @__PURE__ */ jsx(FemAudit, {
+					fem: liveFem,
+					stale
+				}) : null,
+				dock === "CONVERGENCE" ? /* @__PURE__ */ jsx(Convergence, {
+					study,
+					stale: studyStale,
+					tolerancePct: tolPct
+				}) : null,
+				dock === "SUBPANELS" ? /* @__PURE__ */ jsx(PanelTable, {
+					panels: sortedPanels,
+					selected: selectedPanel,
+					sort: panelSort,
+					onSort: setPanelSort,
+					femNote: liveFem ? "The FEM stress is one eigenvalue for the whole plate, not a separate solve for each panel." : "Run FEM for a whole-plate eigenvalue. It is not split into a fabricated per-panel FEM stress.",
+					mode: modeClass,
+					onSelect: (id) => {
+						setSelectedPanel(id);
+						setView("panels");
+					}
+				}) : null,
+				dock === "STIFFENERS" ? /* @__PURE__ */ jsx(StiffenerTable, {
+					items: stiffeners,
+					plateT: parsed.tMm ?? 0,
+					aMm: parsed.aMm ?? 0,
+					bMm: parsed.bMm ?? 0,
+					selected: selectedStiffener,
+					onSelect: setSelectedStiffener
+				}) : null,
+				dock === "CODE" ? /* @__PURE__ */ jsx(CodeTable, { rows: codeRows, method: designMethod, onMethod: setDesignMethod, onOpenDesign: () => { setDesignMethod("as4100"); setDock("DESIGN"); } }) : null,
+				/* @__PURE__ */ jsx("div", {
+					style: { display: dock === "DESIGN" ? "block" : "none" },
+					children: /* @__PURE__ */ jsx(PlateDesign, {
+						panel: {
+							aMm: parsed.aMm,
+							bMm: parsed.bMm,
+							tMm: parsed.tMm,
+							fyMpa: parsed.fyMpa,
+							fuMpa: parsed.fuMpa
+						},
+						elastic: liveFem ? {
+							sigmaCrMpa: liveFem.modes[0]?.sigma1CrMpa ?? null,
+							tauCrMpa: liveFem.modes[0]?.tauCrMpa ?? null,
+							lambda: liveFem.modes[0]?.lambda ?? null
+						} : null,
+						onDesign: setDesign,
+						onStatus: setAs4100Sheet
+					})
+				}),
+				dock === "TRIAL ρ" ? /* @__PURE__ */ jsx(EffectivePane, {
+					rho,
+					setRho,
+					preview: rhoPreview
+				}) : null,
+				dock === "CASES" ? /* @__PURE__ */ jsx(CaseTable, {
+					name: caseName,
+					setName: setCaseName,
+					cases,
+					onDuplicate: duplicateCase,
+					onDelete: (id) => setCases((list) => list.filter((item) => item.id !== id))
+				}) : null,
+				dock === "VERIFY" ? /* @__PURE__ */ jsx(VerifyTable, { rows: verifyRows }) : null
+			]
+		})
+	] });
+}
+function Field({ label, value, onChange, hot, setHot, hint }) {
+	return /* @__PURE__ */ jsxs("label", {
+		className: "field",
+		onMouseEnter: () => hot && setHot?.(hot),
+		onMouseLeave: () => setHot?.(null),
+		children: [
+			/* @__PURE__ */ jsx("span", { children: label }),
+			/* @__PURE__ */ jsx("input", {
+				className: "toolField",
+				inputMode: "decimal",
+				value,
+				onFocus: () => hot && setHot?.(hot),
+				onBlur: () => setHot?.(null),
+				onChange: (event) => onChange(event.target.value)
+			}),
+			hint ? /* @__PURE__ */ jsx("small", { children: hint }) : null
+		]
+	});
+}
+function StiffenerEditor({ items, selected, onSelect, onHot, onAdd, onChange, onSeq, lengthUnit, stressUnit }) {
+	const current = items.find((item) => item.id === selected) ?? items[0] ?? null;
+	const per = lengthToMm(1, lengthUnit);
+	function patchItem(id, partial) {
+		onChange(items.map((item) => item.id === id ? {
+			...item,
+			...partial
+		} : item));
+	}
+	function readLength(raw, fallback) {
+		const n = num(raw);
+		return n == null ? fallback : lengthToMm(n, lengthUnit);
+	}
+	function readStress(raw, fallback) {
+		const n = num(raw);
+		return n == null ? fallback : stressToMpa(n, stressUnit);
+	}
+	return /* @__PURE__ */ jsxs("section", {
+		className: "toolPanel",
+		children: [
+			/* @__PURE__ */ jsx("h2", { children: "Stiffeners" }),
+			/* @__PURE__ */ jsxs("div", {
+				className: "toolToolbar",
+				children: [/* @__PURE__ */ jsx("button", {
+					className: "toolBtn",
+					type: "button",
+					onClick: () => onAdd("x"),
+					children: "ADD LONGITUDINAL"
+				}), /* @__PURE__ */ jsx("button", {
+					className: "toolBtn",
+					type: "button",
+					onClick: () => onAdd("y"),
+					children: "ADD TRANSVERSE"
+				})]
+			}),
+			items.length === 0 ? /* @__PURE__ */ jsx("p", {
+				className: "toolNote",
+				children: "No stiffener. The plate is one panel."
+			}) : null,
+			items.map((item) => /* @__PURE__ */ jsxs("button", {
+				type: "button",
+				className: current?.id === item.id ? "caseChip on" : "caseChip",
+				onMouseEnter: () => onHot(item.id),
+				onMouseLeave: () => onHot(null),
+				onClick: () => onSelect(item.id),
+				children: [
+					item.id,
+					" ",
+					item.axis === "x" ? "LONG" : "TRANS",
+					" ",
+					trimNum(mmToLength(item.atMm, lengthUnit), 3),
+					" ",
+					lengthUnit
+				]
+			}, item.id)),
+			current ? /* @__PURE__ */ jsxs("div", {
+				className: "fieldGrid compact",
+				style: { marginTop: 10 },
+				onMouseEnter: () => onHot(current.id),
+				onMouseLeave: () => onHot(null),
+				children: [
+					/* @__PURE__ */ jsxs("label", {
+						className: "field",
+						children: [/* @__PURE__ */ jsx("span", { children: "Orientation" }), /* @__PURE__ */ jsxs("select", {
+							className: "toolSelect",
+							value: current.axis,
+							onChange: (event) => patchItem(current.id, { axis: event.target.value }),
+							children: [/* @__PURE__ */ jsx("option", {
+								value: "x",
+								children: "Longitudinal, along x"
+							}), /* @__PURE__ */ jsx("option", {
+								value: "y",
+								children: "Transverse, along y"
+							})]
+						})]
+					}),
+					/* @__PURE__ */ jsx(Field, {
+						label: current.axis === "x" ? `y — ${lengthUnit}` : `x — ${lengthUnit}`,
+						value: formatEntry(mmToLength(current.atMm, lengthUnit)),
+						onChange: (value) => patchItem(current.id, { atMm: readLength(value, current.atMm) })
+					}),
+					/* @__PURE__ */ jsxs("label", {
+						className: "field",
+						children: [/* @__PURE__ */ jsx("span", { children: "Section" }), /* @__PURE__ */ jsxs("select", {
+							className: "toolSelect",
+							value: current.kind,
+							onChange: (event) => patchItem(current.id, { kind: event.target.value }),
+							children: [
+								/* @__PURE__ */ jsx("option", {
+									value: "flat",
+									children: "Flat bar"
+								}),
+								/* @__PURE__ */ jsx("option", {
+									value: "plate",
+									children: "Plate"
+								}),
+								/* @__PURE__ */ jsx("option", {
+									value: "angle",
+									children: "Angle"
+								}),
+								/* @__PURE__ */ jsx("option", {
+									value: "tee",
+									children: "Tee"
+								}),
+								/* @__PURE__ */ jsx("option", {
+									value: "custom",
+									children: "Custom"
+								})
+							]
+						})]
+					}),
+					current.kind === "custom" ? /* @__PURE__ */ jsxs(Fragment, { children: [
+						/* @__PURE__ */ jsx(Field, {
+							label: `A — ${lengthUnit}²`,
+							value: formatEntry((current.customA ?? 0) / (per * per)),
+							onChange: (value) => patchItem(current.id, { customA: (num(value) ?? 0) * per * per })
+						}),
+						/* @__PURE__ */ jsx(Field, {
+							label: `I — ${lengthUnit}⁴`,
+							value: formatEntry((current.customI ?? 0) / per ** 4),
+							onChange: (value) => patchItem(current.id, { customI: (num(value) ?? 0) * per ** 4 })
+						}),
+						/* @__PURE__ */ jsx(Field, {
+							label: `J — ${lengthUnit}⁴`,
+							value: formatEntry((current.customJ ?? 0) / per ** 4),
+							onChange: (value) => patchItem(current.id, { customJ: (num(value) ?? 0) * per ** 4 })
+						})
+					] }) : /* @__PURE__ */ jsxs(Fragment, { children: [
+						/* @__PURE__ */ jsx(Field, {
+							label: `h — ${lengthUnit}`,
+							value: formatEntry(mmToLength(current.hMm, lengthUnit)),
+							onChange: (value) => patchItem(current.id, { hMm: readLength(value, current.hMm) })
+						}),
+						/* @__PURE__ */ jsx(Field, {
+							label: `tw — ${lengthUnit}`,
+							value: formatEntry(mmToLength(current.twMm, lengthUnit)),
+							onChange: (value) => patchItem(current.id, { twMm: readLength(value, current.twMm) })
+						}),
+						current.kind === "angle" || current.kind === "tee" ? /* @__PURE__ */ jsxs(Fragment, { children: [/* @__PURE__ */ jsx(Field, {
+							label: `bf — ${lengthUnit}`,
+							value: formatEntry(mmToLength(current.bfMm, lengthUnit)),
+							onChange: (value) => patchItem(current.id, { bfMm: readLength(value, current.bfMm) })
+						}), /* @__PURE__ */ jsx(Field, {
+							label: `tf — ${lengthUnit}`,
+							value: formatEntry(mmToLength(current.tfMm, lengthUnit)),
+							onChange: (value) => patchItem(current.id, { tfMm: readLength(value, current.tfMm) })
+						})] }) : null
+					] }),
+					/* @__PURE__ */ jsx(Field, {
+						label: `E — ${stressUnit}`,
+						value: formatEntry(mpaToStress(current.eMpa, stressUnit)),
+						onChange: (value) => patchItem(current.id, { eMpa: readStress(value, current.eMpa) })
+					}),
+					/* @__PURE__ */ jsx(Field, {
+						label: `fy — ${stressUnit}`,
+						value: formatEntry(mpaToStress(current.fyMpa, stressUnit)),
+						onChange: (value) => patchItem(current.id, { fyMpa: readStress(value, current.fyMpa) })
+					}),
+					/* @__PURE__ */ jsxs("label", {
+						className: "field",
+						children: [/* @__PURE__ */ jsx("span", { children: "Comparison" }), /* @__PURE__ */ jsxs("select", {
+							className: "toolSelect",
+							value: current.rigid ? "rigid" : "flex",
+							onChange: (event) => patchItem(current.id, { rigid: event.target.value === "rigid" }),
+							children: [/* @__PURE__ */ jsx("option", {
+								value: "flex",
+								children: "Flexible — entered EI, GJ"
+							}), /* @__PURE__ */ jsx("option", {
+								value: "rigid",
+								children: "Rigid comparison — EI, GJ × 10000"
+							})]
+						})]
+					}),
+					/* @__PURE__ */ jsxs("div", {
+						className: "toolToolbar",
+						children: [/* @__PURE__ */ jsx("button", {
+							className: "toolBtn",
+							type: "button",
+							onClick: () => {
+								const id = onSeq();
+								onChange([...items, {
+									...current,
+									id,
+									atMm: current.atMm + 40
+								}]);
+								onSelect(id);
+							},
+							children: "DUPLICATE"
+						}), /* @__PURE__ */ jsx("button", {
+							className: "toolBtn",
+							type: "button",
+							onClick: () => {
+								onChange(items.filter((item) => item.id !== current.id));
+								onSelect(items.find((item) => item.id !== current.id)?.id ?? "");
+							},
+							children: "DELETE"
+						})]
+					})
+				]
+			}) : null
+		]
+	});
+}
+function StiffenerTable({ items, plateT, aMm, bMm, selected, onSelect }) {
+	if (items.length === 0) return /* @__PURE__ */ jsx("p", {
+		className: "toolNote",
+		children: "No stiffener. Subpanel geometry is the parent plate."
+	});
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			style: { marginTop: 0 },
+			children: "I is about the plate mid-surface, in canonical mm and N. The editor uses the selected units and converts at this boundary. J is Saint-Venant torsion, not warping. G uses ν = 0.3. A rigid comparison multiplies EI and GJ by 10000 inside the FEM only. EA is reported and is not an out-of-plane degree of freedom. A stiffener is not an infinitely rigid support merely because it exists."
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "toolTableWrap",
+			children: /* @__PURE__ */ jsxs("table", {
+				className: "toolTable",
+				children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("th", { children: "Id" }),
+					/* @__PURE__ */ jsx("th", { children: "Axis" }),
+					/* @__PURE__ */ jsx("th", { children: "At mm" }),
+					/* @__PURE__ */ jsx("th", { children: "A mm²" }),
+					/* @__PURE__ */ jsx("th", { children: "I mm⁴" }),
+					/* @__PURE__ */ jsx("th", { children: "J mm⁴" }),
+					/* @__PURE__ */ jsx("th", { children: "EA N" }),
+					/* @__PURE__ */ jsx("th", { children: "EI N·mm²" }),
+					/* @__PURE__ */ jsx("th", { children: "GJ N·mm²" }),
+					/* @__PURE__ */ jsx("th", { children: "Mass kg" })
+				] }) }), /* @__PURE__ */ jsx("tbody", { children: items.map((item) => {
+					const props = stiffenerProps(item, plateT);
+					return /* @__PURE__ */ jsxs("tr", {
+						className: selected === item.id ? "rowOn" : "",
+						onClick: () => onSelect(item.id),
+						children: [
+							/* @__PURE__ */ jsxs("td", { children: [item.id, item.rigid ? " rigid" : ""] }),
+							/* @__PURE__ */ jsx("td", { children: item.axis === "x" ? "Longitudinal" : "Transverse" }),
+							/* @__PURE__ */ jsx("td", { children: show(item.atMm, 1) }),
+							/* @__PURE__ */ jsx("td", { children: show(props.areaMm2, 1) }),
+							/* @__PURE__ */ jsx("td", { children: show(props.iMm4, 3) }),
+							/* @__PURE__ */ jsx("td", { children: show(props.jMm4, 3) }),
+							/* @__PURE__ */ jsx("td", { children: show(props.eaN, 3) }),
+							/* @__PURE__ */ jsx("td", { children: show(props.eiNmm2, 3) }),
+							/* @__PURE__ */ jsx("td", { children: show(props.gjNmm2, 3) }),
+							/* @__PURE__ */ jsx("td", { children: show(stiffenerMassKg(props.areaMm2, item.axis === "x" ? aMm : bMm), 2) })
+						]
+					}, item.id);
+				}) })]
+			})
+		}),
+		items.map((item) => /* @__PURE__ */ jsxs("p", {
+			className: "toolNote",
+			children: [
+				item.id,
+				": ",
+				stiffenerProps(item, plateT).note
+			]
+		}, item.id)),
+		/* @__PURE__ */ jsx("p", {
+			className: "okBanner",
+			children: "GEOMETRIC SUBPANEL IDENTIFIED. STIFFENER DESIGN ADEQUATE: NOT VERIFIED. SUBPANEL EDGE ASSUMED FULLY RESTRAINED: NO."
+		})
+	] });
+}
+function PanelTable({ panels, selected, sort, onSort, femNote, mode, onSelect }) {
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			style: { marginTop: 0 },
+			children: femNote
+		}),
+		panels.some((panel) => panel.status.includes("NOT VERIFIED")) ? /* @__PURE__ */ jsx("p", {
+			className: "okBanner",
+			children: "GEOMETRIC SUBPANEL IDENTIFIED. STIFFENER DESIGN ADEQUATE: NOT VERIFIED. SUBPANEL EDGE ASSUMED FULLY RESTRAINED: NO."
+		}) : null,
+		mode ? /* @__PURE__ */ jsxs("p", {
+			className: "toolNote",
+			children: [
+				"Eigenmode reading: ",
+				mode.kind,
+				mode.panelId ? ` · ${mode.panelId}` : "",
+				". This is not a code rule and the smallest panel is not assumed to govern."
+			]
+		}) : null,
+		/* @__PURE__ */ jsx("div", {
+			className: "toolToolbar",
+			children: /* @__PURE__ */ jsx("button", {
+				className: "toolBtn",
+				type: "button",
+				onClick: () => onSort(sort === "id" ? "stress" : "id"),
+				children: sort === "id" ? "SORT BY σcr" : "SORT BY ID"
+			})
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "toolTableWrap",
+			children: /* @__PURE__ */ jsxs("table", {
+				className: "toolTable",
+				children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("th", { children: "Panel" }),
+					/* @__PURE__ */ jsx("th", { children: "a" }),
+					/* @__PURE__ */ jsx("th", { children: "b" }),
+					/* @__PURE__ */ jsx("th", { children: "α" }),
+					/* @__PURE__ */ jsx("th", { children: "ψ" }),
+					/* @__PURE__ */ jsx("th", { children: "σ1" }),
+					/* @__PURE__ */ jsx("th", { children: "σ2" }),
+					/* @__PURE__ */ jsx("th", { children: "τ" }),
+					/* @__PURE__ */ jsx("th", { children: "Analytical σcr" }),
+					/* @__PURE__ */ jsx("th", { children: "Mode" })
+				] }) }), /* @__PURE__ */ jsx("tbody", { children: panels.map((panel) => /* @__PURE__ */ jsxs("tr", {
+					className: selected === panel.id ? "rowOn" : "",
+					onClick: () => onSelect(panel.id),
+					children: [
+						/* @__PURE__ */ jsx("td", { children: panel.id }),
+						/* @__PURE__ */ jsx("td", { children: show(panel.aMm, 1) }),
+						/* @__PURE__ */ jsx("td", { children: show(panel.bMm, 1) }),
+						/* @__PURE__ */ jsx("td", { children: show(panel.alpha, 3) }),
+						/* @__PURE__ */ jsx("td", { children: show(panel.psi, 3) }),
+						/* @__PURE__ */ jsx("td", { children: show(panel.sigmaBottom, 2) }),
+						/* @__PURE__ */ jsx("td", { children: show(panel.sigmaTop, 2) }),
+						/* @__PURE__ */ jsx("td", { children: show(panel.tau, 2) }),
+						/* @__PURE__ */ jsx("td", { children: panel.closedForm && panel.sigmaCrMpa != null ? `${show(panel.sigmaCrMpa, 2)} MPa` : "NO CLOSED-FORM SOLUTION — FEM REQUIRED" }),
+						/* @__PURE__ */ jsx("td", { children: mode?.panelId === panel.id ? mode.kind : panel.closedForm && panel.m != null ? `${panel.m}×${panel.n}` : "—" })
+					]
+				}, panel.id)) })]
+			})
+		})
+	] });
+}
+function FemAudit({ fem, stale }) {
+	if (stale) return /* @__PURE__ */ jsx("p", {
+		className: "failBanner",
+		children: "STALE — INPUTS CHANGED. RUN FEM AGAIN."
+	});
+	if (!fem?.ok) return /* @__PURE__ */ jsx("p", {
+		className: "toolNote",
+		children: "Run FEM. The worker builds K and Kg, applies the edge restraints, and returns eigenvalues. Nothing is filled in before that."
+	});
+	const mode = fem.modes[0];
+	const hx = mode && mode.w.length ? countHalfWaves(mode.w, fem.xs, fem.ys, "x") : null;
+	const hy = mode && mode.w.length ? countHalfWaves(mode.w, fem.xs, fem.ys, "y") : null;
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsx("h2", { children: `SOLVER DIAGNOSTICS — ${ELASTIC_ENGINE.id}` }),
+		/* @__PURE__ */ jsxs("div", {
+			className: "resultList",
+			children: [
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "First positive λ" }), /* @__PURE__ */ jsx("b", { children: mode ? show(mode.lambda, 4) : "—" })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Iterations" }), /* @__PURE__ */ jsx("b", { children: fem.iterations })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Solver tolerance" }), /* @__PURE__ */ jsx("b", { children: fem.solverTolerance.toExponential(0) })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Residual ||Kφ − λKgφ|| / ||Kφ||" }), /* @__PURE__ */ jsx("b", { children: fem.residual.toExponential(2) })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Matrix size" }), /* @__PURE__ */ jsx("b", { children: fem.dof })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Free DOF" }), /* @__PURE__ */ jsx("b", { children: fem.freeDof })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Mesh" }), /* @__PURE__ */ jsxs("b", { children: [
+					fem.nx,
+					" × ",
+					fem.ny
+				] })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Elements" }), /* @__PURE__ */ jsx("b", { children: fem.elements })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Nodes" }), /* @__PURE__ */ jsx("b", { children: fem.nodes })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Time" }), /* @__PURE__ */ jsxs("b", { children: [show(fem.seconds, 2), " s"] })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Element aspect" }), /* @__PURE__ */ jsx("b", { children: show(fem.elementAspect, 2) })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "Mode 1 half-waves x × y" }), /* @__PURE__ */ jsx("b", { children: hx == null ? "—" : `${hx} × ${hy}` })] })
+			]
+		}),
+		fem.aspectWarning ? /* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: fem.aspectWarning
+		}) : null,
+		fem.residual > fem.solverTolerance ? /* @__PURE__ */ jsxs("p", {
+			className: "toolNote",
+			children: [
+				"Residual is above the ",
+				fem.solverTolerance.toExponential(0),
+				" target. The residual is shown, not hidden. A negative partner is not a second capacity."
+			]
+		}) : /* @__PURE__ */ jsxs("p", {
+			className: "okBanner",
+			children: [
+				"SOLVER STATUS — CONVERGED. Residual is within ",
+				fem.solverTolerance.toExponential(0),
+				"."
+			]
+		}),
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: fem.formulation
+		}),
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: fem.note
+		}),
+		/* @__PURE__ */ jsx("h2", { children: "SHOW FEM CONNECTIVITY" }),
+		fem.stiffenerNotes.length === 0 ? /* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: "No stiffener in this solve."
+		}) : fem.stiffenerNotes.map((line) => /* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: line
+		}, line)),
+		fem.prestressNote ? /* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: fem.prestressNote
+		}) : null,
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: "These rows are positive eigenvalues only, smallest first. A negative partner is the reversed membrane field. It is not listed here as a capacity."
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "toolTableWrap",
+			children: /* @__PURE__ */ jsxs("table", {
+				className: "toolTable",
+				children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("th", { children: "Mode" }),
+					/* @__PURE__ */ jsx("th", { children: "λ" }),
+					/* @__PURE__ */ jsx("th", { children: "λ · σ1" }),
+					/* @__PURE__ */ jsx("th", { children: "λ · σy" }),
+					/* @__PURE__ */ jsx("th", { children: "λ · τ" })
+				] }) }), /* @__PURE__ */ jsx("tbody", { children: fem.modes.map((item, index) => /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("td", { children: index + 1 }),
+					/* @__PURE__ */ jsx("td", { children: show(item.lambda, 4) }),
+					/* @__PURE__ */ jsx("td", { children: item.sigma1CrMpa == null ? "—" : `${show(item.sigma1CrMpa, 2)} MPa` }),
+					/* @__PURE__ */ jsx("td", { children: item.sigmaYCrMpa == null ? "—" : `${show(item.sigmaYCrMpa, 2)} MPa` }),
+					/* @__PURE__ */ jsx("td", { children: item.tauCrMpa == null ? "—" : `${show(item.tauCrMpa, 2)} MPa` })
+				] }, `${item.lambda}-${index}`)) })]
+			})
+		})
+	] });
+}
+function Convergence({ study, stale, tolerancePct }) {
+	if (!study) return /* @__PURE__ */ jsxs("p", {
+		className: "toolNote",
+		children: [
+			"RUN MESH CONVERGENCE solves 10, 20, 40 and 80 elements on the short side, with the long side increased so the element aspect stays nearer 1, capped at 80. Stiffener lines and patch ends stay in the mesh. CONVERGED means the last two critical values differ by less than ",
+			tolerancePct,
+			"%."
+		]
+	});
+	const solved = study.rows.filter((row) => row.criticalMpa != null);
+	const last = [...solved].reverse().find((row) => row.changePct != null)?.changePct ?? null;
+	const ok = !stale && solved.length >= 2 && last != null && Math.abs(last) < tolerancePct;
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		stale ? /* @__PURE__ */ jsx("p", {
+			className: "failBanner",
+			children: "CONVERGENCE STALE — INPUTS CHANGED"
+		}) : null,
+		/* @__PURE__ */ jsx("p", {
+			className: ok ? "okBanner" : "failBanner",
+			children: stale ? "NOT CONVERGED — STALE" : ok ? `CONVERGED within ${tolerancePct}%` : `NOT CONVERGED within ${tolerancePct}%`
+		}),
+		/* @__PURE__ */ jsxs("p", {
+			className: "toolNote",
+			children: [study.note, " An FEM result is not verified without this check."]
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "toolTableWrap",
+			children: /* @__PURE__ */ jsxs("table", {
+				className: "toolTable",
+				children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("th", { children: "Mesh" }),
+					/* @__PURE__ */ jsx("th", { children: "Elements" }),
+					/* @__PURE__ */ jsx("th", { children: "DOF" }),
+					/* @__PURE__ */ jsx("th", { children: "λ1" }),
+					/* @__PURE__ */ jsx("th", { children: "Critical" }),
+					/* @__PURE__ */ jsx("th", { children: "Change" }),
+					/* @__PURE__ */ jsx("th", { children: "MAC" }),
+					/* @__PURE__ */ jsx("th", { children: "Waves" }),
+					/* @__PURE__ */ jsx("th", { children: "Time" })
+				] }) }), /* @__PURE__ */ jsx("tbody", { children: study.rows.map((row) => /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsxs("td", { children: [
+						row.nx,
+						"×",
+						row.ny
+					] }),
+					/* @__PURE__ */ jsx("td", { children: row.elements }),
+					/* @__PURE__ */ jsx("td", { children: row.freeDof }),
+					/* @__PURE__ */ jsx("td", { children: show(row.lambda, 4) }),
+					/* @__PURE__ */ jsx("td", { children: row.criticalMpa == null ? row.status : show(row.criticalMpa, 2) }),
+					/* @__PURE__ */ jsx("td", { children: row.changePct == null ? "—" : `${show(row.changePct, 2)}%` }),
+					/* @__PURE__ */ jsx("td", { children: row.mac == null ? "—" : show(row.mac, 3) }),
+					/* @__PURE__ */ jsx("td", { children: row.wavesX == null ? "—" : `${row.wavesX}×${row.wavesY}` }),
+					/* @__PURE__ */ jsxs("td", { children: [show(row.seconds, 2), " s"] })
+				] }, `${row.nx}x${row.ny}`)) })]
+			})
+		}),
+		/* @__PURE__ */ jsx(ConvergencePlot, { rows: study.rows })
+	] });
+}
+function ConvergencePlot({ rows }) {
+	const pts = rows.filter((row) => row.criticalMpa != null);
+	if (pts.length < 2) return null;
+	const w = 640;
+	const h = 180;
+	const pad = 28;
+	const min = Math.min(...pts.map((row) => row.criticalMpa));
+	const max = Math.max(...pts.map((row) => row.criticalMpa));
+	const span = Math.max(1e-9, max - min);
+	const x = (i) => pad + i * 584 / Math.max(1, pts.length - 1);
+	const y = (v) => 152 - (v - min) / span * 124;
+	const d = pts.map((row, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(row.criticalMpa).toFixed(1)}`).join(" ");
+	return /* @__PURE__ */ jsxs("svg", {
+		className: "convPlot",
+		viewBox: `0 0 ${w} ${h}`,
+		role: "img",
+		"aria-label": "Critical stress against mesh density",
+		children: [
+			/* @__PURE__ */ jsx("text", {
+				x: pad,
+				y: "16",
+				fill: "#111",
+				fontSize: "12",
+				children: "CRITICAL STRESS vs MESH"
+			}),
+			/* @__PURE__ */ jsx("path", {
+				d,
+				fill: "none",
+				stroke: "#111",
+				strokeWidth: "1.6"
+			}),
+			pts.map((row, i) => /* @__PURE__ */ jsx("circle", {
+				cx: x(i),
+				cy: y(row.criticalMpa),
+				r: "3",
+				fill: "#111"
+			}, `${row.nx}-${row.ny}`))
+		]
+	});
+}
+function CodeTable({ rows, method, onMethod, onOpenDesign }) {
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			style: { marginTop: 0 },
+			children: "Choose the design standard. Elastic σcr and the FEM eigenvalue are not a design resistance. AS 4100 dimensions and results are entered on DESIGN."
+		}),
+		/* @__PURE__ */ jsxs("label", { className: "field", children: [
+			/* @__PURE__ */ jsx("span", { children: "Design standard" }),
+			/* @__PURE__ */ jsx("select", {
+				value: method,
+				onChange: (event) => {
+					onMethod(event.target.value);
+					if (event.target.value === "as4100") onOpenDesign();
+				},
+				children: [
+					["none", "NONE — ELASTIC ANALYSIS ONLY"],
+					["as4100", "AS 4100"],
+					["en1993", "EN 1993-1-5"],
+					["as5224", "AS 5224 / ISO 20332"]
+				].map(([id, label]) => /* @__PURE__ */ jsx("option", { value: id, children: label }, id))
+			})
+		] }),
+		/* @__PURE__ */ jsx("div", { className: "toolToolbar", children: /* @__PURE__ */ jsx("button", {
+			type: "button",
+			className: "toolBtn",
+			onClick: onOpenDesign,
+			children: "OPEN AS 4100 DESIGN"
+		}) }),
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: "AS 4100 design inputs and results are in DESIGN. This table is the standard status only. It does not take plate dimensions. EN 1993-1-5 and AS 5224 are not part of this check."
+		}),
+		/* @__PURE__ */ jsx("details", {
+			className: "quietHelp",
+			children: [
+				/* @__PURE__ */ jsx("summary", { children: "Standard status table — not where dimensions are entered" }),
+				/* @__PURE__ */ jsx("div", {
+					className: "toolTableWrap",
+					children: /* @__PURE__ */ jsxs("table", {
+						className: "toolTable",
+						children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+							/* @__PURE__ */ jsx("th", { children: "Check" }),
+							/* @__PURE__ */ jsx("th", { children: "Clause" }),
+							/* @__PURE__ */ jsx("th", { children: "Status" }),
+							/* @__PURE__ */ jsx("th", { children: "Equation" }),
+							/* @__PURE__ */ jsx("th", { children: "Result" })
+						] }) }), /* @__PURE__ */ jsx("tbody", { children: rows.map((row) => /* @__PURE__ */ jsxs("tr", { children: [
+							/* @__PURE__ */ jsxs("td", { children: [
+								row.group,
+								": ",
+								row.title
+							] }),
+							/* @__PURE__ */ jsx("td", { children: row.clause }),
+							/* @__PURE__ */ jsx("td", { children: STATUS[row.status] }),
+							/* @__PURE__ */ jsx("td", { children: row.equation }),
+							/* @__PURE__ */ jsx("td", { children: row.result })
+						] }, row.id)) })]
+					})
+				}),
+				rows.map((row) => /* @__PURE__ */ jsxs("p", {
+					className: "toolNote",
+					children: [
+						row.title,
+						": ",
+						row.substitution,
+						" ",
+						row.note
+					]
+				}, `${row.id}-n`))
+			]
+		})
+	] });
+}
+function EffectivePane({ rho, setRho, preview }) {
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsx("p", {
+			className: "failBanner",
+			children: "TRIAL ρ — NOT AS 4100 DESIGN. This hatch is a manual preview only."
+		}),
+		/* @__PURE__ */ jsx("p", {
+			className: "failBanner",
+			children: "MANUAL ρ — NOT AS 4100 DESIGN. Preview only."
+		}),
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: "Trial ρ is a hatch preview. It is not the AS 4100 effective width be. That result is on DESIGN."
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "fieldGrid compact",
+			children: /* @__PURE__ */ jsx(Field, {
+				label: "Trial ρ — not a code result",
+				value: rho,
+				onChange: setRho
+			})
+		}),
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: preview == null ? "No preview until ρ is strictly between 0 and 1." : `Preview ρ = ${show(preview, 3)}. The drawing view TRIAL ρ shows the hatch. It is not be.`
+		})
+	] });
+}
+function CaseTable({ name, setName, cases, onDuplicate, onDelete }) {
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			style: { marginTop: 0 },
+			children: "DUPLICATE CASE stores the current mass, classical stress and FEM stress. Change the plate, then duplicate again. Utilisation stays blank until a code check can return a number. Density 7850 kg/m³ is an assumed constant, not a grade table."
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "fieldGrid compact",
+			children: /* @__PURE__ */ jsx(Field, {
+				label: "Case name",
+				value: name,
+				onChange: setName
+			})
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "toolToolbar",
+			children: /* @__PURE__ */ jsx("button", {
+				className: "toolBtn",
+				type: "button",
+				onClick: onDuplicate,
+				children: "DUPLICATE CASE"
+			})
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "toolTableWrap",
+			children: /* @__PURE__ */ jsxs("table", {
+				className: "toolTable",
+				children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("th", { children: "Case" }),
+					/* @__PURE__ */ jsx("th", { children: "Plate kg" }),
+					/* @__PURE__ */ jsx("th", { children: "Stiffener kg" }),
+					/* @__PURE__ */ jsx("th", { children: "Total kg" }),
+					/* @__PURE__ */ jsx("th", { children: "Classical" }),
+					/* @__PURE__ */ jsx("th", { children: "FEM" }),
+					/* @__PURE__ */ jsx("th", { children: "Patch Fcr" }),
+					/* @__PURE__ */ jsx("th", { children: "Mode" }),
+					/* @__PURE__ */ jsx("th", { children: "Utilisation" }),
+					/* @__PURE__ */ jsx("th", {})
+				] }) }), /* @__PURE__ */ jsx("tbody", { children: cases.map((row) => /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("td", { children: row.name }),
+					/* @__PURE__ */ jsx("td", { children: show(row.plateKg, 2) }),
+					/* @__PURE__ */ jsx("td", { children: show(row.stiffKg, 2) }),
+					/* @__PURE__ */ jsx("td", { children: show(row.totalKg, 2) }),
+					/* @__PURE__ */ jsx("td", { children: row.classicalMpa == null ? "—" : `${show(row.classicalMpa, 2)} MPa` }),
+					/* @__PURE__ */ jsx("td", { children: row.femMpa == null ? "—" : `${show(row.femMpa, 2)} MPa` }),
+					/* @__PURE__ */ jsx("td", { children: row.patchCrN == null ? "—" : `${show(row.patchCrN, 1)} N` }),
+					/* @__PURE__ */ jsx("td", { children: row.mode }),
+					/* @__PURE__ */ jsx("td", { children: row.utilisation }),
+					/* @__PURE__ */ jsx("td", { children: /* @__PURE__ */ jsx("button", {
+						type: "button",
+						className: "toolBtn",
+						onClick: () => onDelete(row.id),
+						children: "DELETE"
+					}) })
+				] }, row.id)) })]
+			})
+		})
+	] });
+}
+function VerifyTable({ rows }) {
+	if (!rows) return /* @__PURE__ */ jsx("p", {
+		className: "toolNote",
+		children: "RUN QUICK VERIFICATION is V01–V20. RUN FULL VERIFICATION adds the aspect, ψ, shear-series, biaxial, combined-sign, stiffener-limit, patch-sweep and equilibrium rows. A pass is not a design certificate. Code patch resistance is not in this set."
+	});
+	const count = (status) => rows.filter((row) => row.status === status).length;
+	const label = {
+		pass: "PASS",
+		fail: "FAIL",
+		limited: "LIMITED",
+		"not-verified": "NOT VERIFIED"
+	};
+	return /* @__PURE__ */ jsxs(Fragment, { children: [
+		/* @__PURE__ */ jsxs("div", {
+			className: "resultList",
+			children: [
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "TOTAL" }), /* @__PURE__ */ jsx("b", { children: rows.length })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "PASS" }), /* @__PURE__ */ jsx("b", { children: count("pass") })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "FAIL" }), /* @__PURE__ */ jsx("b", { children: count("fail") })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "LIMITED" }), /* @__PURE__ */ jsx("b", { children: count("limited") })] }),
+				/* @__PURE__ */ jsxs("div", { children: [/* @__PURE__ */ jsx("span", { children: "NOT VERIFIED" }), /* @__PURE__ */ jsx("b", { children: count("not-verified") })] })
+			]
+		}),
+		/* @__PURE__ */ jsx("p", {
+			className: "toolNote",
+			children: "PASS means that row met its own tolerance. LIMITED means the check ran but the basis is a fit, a residual floor, or not a code rule. NOT VERIFIED is not a pass. This button does not certify AS 4100, EN 1993-1-5 or AS 5224 resistance."
+		}),
+		/* @__PURE__ */ jsx("div", {
+			className: "toolTableWrap",
+			children: /* @__PURE__ */ jsxs("table", {
+				className: "toolTable",
+				children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("th", { children: "Test" }),
+					/* @__PURE__ */ jsx("th", { children: "Expected" }),
+					/* @__PURE__ */ jsx("th", { children: "Actual" }),
+					/* @__PURE__ */ jsx("th", { children: "Difference" }),
+					/* @__PURE__ */ jsx("th", { children: "Tolerance" }),
+					/* @__PURE__ */ jsx("th", { children: "Mesh" }),
+					/* @__PURE__ */ jsx("th", { children: "Residual" }),
+					/* @__PURE__ */ jsx("th", { children: "Basis" }),
+					/* @__PURE__ */ jsx("th", { children: "Status" })
+				] }) }), /* @__PURE__ */ jsx("tbody", { children: rows.map((row) => /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsxs("td", { children: [
+						row.id,
+						" ",
+						row.title
+					] }),
+					/* @__PURE__ */ jsx("td", { children: row.expected }),
+					/* @__PURE__ */ jsx("td", { children: row.actual }),
+					/* @__PURE__ */ jsx("td", { children: row.difference }),
+					/* @__PURE__ */ jsx("td", { children: row.tolerance }),
+					/* @__PURE__ */ jsx("td", { children: row.mesh }),
+					/* @__PURE__ */ jsx("td", { children: row.residual }),
+					/* @__PURE__ */ jsx("td", { children: row.basis }),
+					/* @__PURE__ */ jsx("td", { children: label[row.status] })
+				] }, row.id)) })]
+			})
+		})
+	] });
+}
+function Trace({ result, fem, stiffeners, plateT }) {
+	return /* @__PURE__ */ jsx("div", {
+		className: "toolTableWrap",
+		children: /* @__PURE__ */ jsxs("table", {
+			className: "toolTable",
+			children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+				/* @__PURE__ */ jsx("th", { children: "Step" }),
+				/* @__PURE__ */ jsx("th", { children: "Equation" }),
+				/* @__PURE__ */ jsx("th", { children: "Substitution" }),
+				/* @__PURE__ */ jsx("th", { children: "Result" })
+			] }) }), /* @__PURE__ */ jsxs("tbody", { children: [
+				fem?.prestressNote ? /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("td", { children: "Pre-buckling" }),
+					/* @__PURE__ */ jsx("td", { children: "Plane stress, then Kg" }),
+					/* @__PURE__ */ jsx("td", { children: fem.formulation }),
+					/* @__PURE__ */ jsx("td", { children: fem.prestressNote })
+				] }) : null,
+				result?.ok ? result.steps.map((step) => /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("td", { children: step.label }),
+					/* @__PURE__ */ jsx("td", { children: step.equation }),
+					/* @__PURE__ */ jsx("td", { children: step.substitution }),
+					/* @__PURE__ */ jsx("td", { children: showStep(step.result) })
+				] }, step.id)) : /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("td", { children: "Classical" }),
+					/* @__PURE__ */ jsx("td", { children: "—" }),
+					/* @__PURE__ */ jsx("td", { children: result?.reason ?? "Waiting for inputs" }),
+					/* @__PURE__ */ jsx("td", { children: "—" })
+				] }),
+				stiffeners.map((item) => {
+					const props = stiffenerProps(item, plateT);
+					return /* @__PURE__ */ jsxs("tr", { children: [
+						/* @__PURE__ */ jsxs("td", { children: [item.id, " section"] }),
+						/* @__PURE__ */ jsx("td", { children: "A, I = ∫z² dA, J Saint-Venant. EA, EI and GJ follow." }),
+						/* @__PURE__ */ jsxs("td", { children: [
+							item.kind,
+							", h = ",
+							item.hMm,
+							" mm, tw = ",
+							item.twMm,
+							" mm, at ",
+							item.atMm,
+							" mm"
+						] }),
+						/* @__PURE__ */ jsxs("td", { children: [
+							props.note,
+							" A = ",
+							show(props.areaMm2, 1),
+							" mm², I = ",
+							show(props.iMm4, 3),
+							" mm⁴, EI = ",
+							show(props.eiNmm2, 3),
+							" N·mm²"
+						] })
+					] }, item.id);
+				}),
+				fem?.ok ? /* @__PURE__ */ jsxs("tr", { children: [
+					/* @__PURE__ */ jsx("td", { children: "FEM eigenvalue" }),
+					/* @__PURE__ */ jsx("td", { children: "Kφ = λ Kgφ" }),
+					/* @__PURE__ */ jsxs("td", { children: [
+						fem.formulation,
+						" Mesh ",
+						fem.nx,
+						"×",
+						fem.ny,
+						", free DOF ",
+						fem.freeDof,
+						", residual ",
+						fem.residual.toExponential(2),
+						"."
+					] }),
+					/* @__PURE__ */ jsxs("td", { children: [
+						"λ1 = ",
+						show(fem.modes[0]?.lambda ?? null, 4),
+						" · σ1,cr = ",
+						fem.modes[0]?.sigma1CrMpa == null ? "—" : `${show(fem.modes[0].sigma1CrMpa, 2)} MPa`
+					] })
+				] }) : null
+			] })]
+		})
+	});
+}
+
+export { PlateTool }
+
+
+========================================================================
+FILE src/components/preview-host-bridge.tsx
+========================================================================
+
+/**
+ * Mount once in `__root.tsx` so the Grok preview chrome can drive navigation
+ * (and later receive registered routes). Noops when the app is not embedded.
+ */
+
+import { useEffect } from "react";
+import { useRouter } from "@tanstack/react-router";
+import {
+  collectRoutePathsFromTree,
+  installPreviewHostBridge,
+} from "@/lib/preview-host-bridge";
+
+export function PreviewHostBridge() {
+  const router = useRouter();
+
+  useEffect(() => {
+    return installPreviewHostBridge({
+      navigate: (path) => {
+        router.history.push(path);
+      },
+      getRoutePaths: () => collectRoutePathsFromTree(router.routeTree),
+    });
+  }, [router]);
+
+  return null;
+}
+
+
+========================================================================
+FILE src/components/torque-panel.tsx
+========================================================================
+
+import { useMemo, useState } from "react"
+import { METRIC_SIZES } from "../bolts/database.ts"
+import { classBand, STAINLESS_CLASSES } from "../bolts/materials.ts"
+import { threadProfile } from "../bolts/threadGeometry.ts"
+import { boltTorque, FRICTION_PRESETS, TORQUE_WARNING } from "../bolts/torque.ts"
+import { trimNum } from "../reference/format.ts"
+import { buildSheet } from "../bolts/model.ts"
+
+const PERCENTS = [50, 60, 70, 75, 80, 90]
+
+export function TorquePanel({ sheet, classId }: { sheet: ReturnType<typeof buildSheet>; classId: string }) {
+  const [preset, setPreset] = useState("user")
+  const [kText, setKText] = useState("")
+  const [percent, setPercent] = useState("70")
+  const [manual, setManual] = useState("")
+  const [torque, setTorque] = useState("")
+  const [muT, setMuT] = useState("")
+  const [muB, setMuB] = useState("")
+  const [od, setOd] = useState("")
+  const [id, setId] = useState("")
+  const [stainless, setStainless] = useState("")
+  const profile = sheet.profile
+  const chosen = STAINLESS_CLASSES.find((item) => item.id === stainless)
+  const basisMPa = chosen ? chosen.rp : sheet.band?.sp ?? 0
+  const basisName = chosen ? `${chosen.id} Rp0.2` : "Proof stress Sp"
+
+  const parsed = useMemo(() => {
+    if (!profile || !(basisMPa > 0)) return { ok: false as const, reason: "No stress area or proof stress for this bolt." }
+    return boltTorque({
+      dMm: sheet.dMm,
+      pitchMm: sheet.pitchMm,
+      d2Mm: profile.d2,
+      asMm2: profile.As,
+      basisMPa,
+      basisName,
+      percent: numOrNull(percent),
+      manualKn: numOrNull(manual),
+      k: numOrNull(kText),
+      torqueNm: numOrNull(torque),
+      muThread: numOrNull(muT),
+      muBearing: numOrNull(muB),
+      bearingOdMm: numOrNull(od),
+      bearingIdMm: numOrNull(id),
+    })
+  }, [profile, sheet.dMm, sheet.pitchMm, basisMPa, basisName, percent, manual, kText, torque, muT, muB, od, id])
+
+  function pickPreset(id: string) {
+    setPreset(id)
+    const item = FRICTION_PRESETS.find((row) => row.id === id)
+    setKText(item?.k == null ? "" : String(item.k))
+  }
+
+  const activePreset = FRICTION_PRESETS.find((item) => item.id === preset)
+  const rows = METRIC_SIZES.filter((size) => size.d <= 30 || size.d === sheet.dMm)
+
+  return (
+    <>
+      <p className="failBanner">{TORQUE_WARNING}</p>
+      <p className="toolNote" style={{ marginTop: 0 }}>
+        Proof load, yield and tensile strength are different. A percentage is not a recommendation. Carbon-steel class properties are not applied to a stainless fastener.
+      </p>
+      <div className="fieldGrid compact">
+        <label className="field">
+          <span>Installation condition</span>
+          <select className="toolSelect" value={preset} onChange={(e) => pickPreset(e.target.value)}>
+            {FRICTION_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+          <small>{activePreset?.note} The value below is what is actually used. Edit it.</small>
+        </label>
+        <label className="field">
+          <span>Nut factor K</span>
+          <input className="toolField" inputMode="decimal" value={kText} onChange={(e) => setKText(e.target.value)} />
+          <small>T = K × F × d. K is not hidden.</small>
+        </label>
+        <label className="field">
+          <span>Percent of proof load</span>
+          <select className="toolSelect" value={percent} onChange={(e) => setPercent(e.target.value)}>
+            <option value="">Not used</option>
+            {PERCENTS.map((item) => <option key={item} value={item}>{item}%</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Or target preload — kN</span>
+          <input className="toolField" inputMode="decimal" value={manual} onChange={(e) => setManual(e.target.value)} />
+          <small>If you type a preload, it replaces the percentage.</small>
+        </label>
+        <label className="field">
+          <span>Installation torque — N·m</span>
+          <input className="toolField" inputMode="decimal" value={torque} onChange={(e) => setTorque(e.target.value)} />
+          <small>With K, this estimates preload. It does not verify tension.</small>
+        </label>
+        <label className="field">
+          <span>Stainless basis, optional</span>
+          <select className="toolSelect" value={stainless} onChange={(e) => setStainless(e.target.value)}>
+            <option value="">Use this bolt's proof stress</option>
+            {STAINLESS_CLASSES.map((item) => <option key={item.id} value={item.id}>{item.id} — Rp0.2 {item.rp} MPa</option>)}
+          </select>
+          <small>Reference only. It does not change the AS 4100 check.</small>
+        </label>
+      </div>
+      {!parsed.ok ? <p className="failBanner">{parsed.reason}</p> : (
+        <div className="resultList" style={{ marginTop: 12 }}>
+          <div><span>{basisName}</span><b>{trimNum(parsed.proofKn, 2)} kN</b></div>
+          <div><span>Preload from percent</span><b>{parsed.fromPercentKn == null ? "—" : `${trimNum(parsed.fromPercentKn, 2)} kN`}</b></div>
+          <div><span>Torque from that preload</span><b>{parsed.torqueFromPreloadNm == null ? "Enter K" : `${trimNum(parsed.torqueFromPreloadNm, 1)} N·m`}</b></div>
+          <div><span>Preload from the torque</span><b>{parsed.fromTorqueKn == null ? "Enter torque and K" : `${trimNum(parsed.fromTorqueKn, 2)} kN`}</b></div>
+          <div><span>That preload / proof</span><b>{parsed.percentOfProof == null ? "—" : `${trimNum(parsed.percentOfProof, 1)}%`}</b></div>
+          <div><span>Thread torque</span><b>{parsed.threadNm == null ? "Needs μ and washer diameters" : `${trimNum(parsed.threadNm, 1)} N·m`}</b></div>
+          <div><span>Bearing torque</span><b>{parsed.bearingNm == null ? "—" : `${trimNum(parsed.bearingNm, 1)} N·m`}</b></div>
+          <div><span>Split total</span><b>{parsed.advancedNm == null ? "—" : `${trimNum(parsed.advancedNm, 1)} N·m`}</b></div>
+          <div><span>K implied by the split</span><b>{parsed.kFromAdvanced == null ? "—" : trimNum(parsed.kFromAdvanced, 3)}</b></div>
+        </div>
+      )}
+      <details className="toolGloss">
+        <summary>SPLIT THE TORQUE — THREAD AND BEARING</summary>
+        <div className="inner">
+          <p className="toolNote" style={{ marginTop: 0 }}>No washer is assumed. Enter both friction coefficients and the face that actually rubs. The installation condition does not fill these.</p>
+          <div className="fieldGrid compact">
+            <label className="field"><span>μ thread</span><input className="toolField" inputMode="decimal" value={muT} onChange={(e) => setMuT(e.target.value)} /></label>
+            <label className="field"><span>μ bearing</span><input className="toolField" inputMode="decimal" value={muB} onChange={(e) => setMuB(e.target.value)} /></label>
+            <label className="field"><span>Bearing outside — mm</span><input className="toolField" inputMode="decimal" value={od} onChange={(e) => setOd(e.target.value)} /></label>
+            <label className="field"><span>Bearing inside — mm</span><input className="toolField" inputMode="decimal" value={id} onChange={(e) => setId(e.target.value)} /></label>
+          </div>
+        </div>
+      </details>
+      {parsed.ok ? (
+        <details className="toolGloss">
+          <summary>SHOW THE ARITHMETIC</summary>
+          <div className="inner">
+            <div className="toolTableWrap">
+              <table className="toolTable">
+                <thead><tr><th>Step</th><th>Equation</th><th>Substitution</th><th>Result</th></tr></thead>
+                <tbody>
+                  {parsed.steps.map((step) => (
+                    <tr key={step.label}><td>{step.label}</td><td>{step.equation}</td><td>{step.substitution}</td><td>{step.result}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+      ) : null}
+      <h2 style={{ marginTop: 16 }}>Coarse sizes at this K and percent</h2>
+      <p className="toolNote" style={{ marginTop: 0 }}>
+        Calculated for metric coarse pitch and {basisName}. K = {kText.trim() || "not set"}. Percent = {percent || "not set"}. Not a published torque chart.
+      </p>
+      <div className="toolTableWrap">
+        <table className="toolTable">
+          <thead><tr><th>Bolt</th><th>As mm²</th><th>Proof kN</th><th>Preload kN</th><th>Torque N·m</th></tr></thead>
+          <tbody>
+            {rows.map((size) => {
+              const band = chosen ? { sp: chosen.rp } : classBand(classId, size.d)
+              if (!band) return null
+              const thread = threadProfile(size.d, size.coarse)
+              const result = boltTorque({
+                dMm: size.d,
+                pitchMm: size.coarse,
+                d2Mm: thread.d2,
+                asMm2: thread.As,
+                basisMPa: band.sp,
+                basisName,
+                percent: numOrNull(percent),
+                manualKn: null,
+                k: numOrNull(kText),
+                torqueNm: null,
+                muThread: null,
+                muBearing: null,
+                bearingOdMm: null,
+                bearingIdMm: null,
+              })
+              if (!result.ok) return null
+              return (
+                <tr key={size.d} className={size.d === sheet.dMm ? "active" : ""}>
+                  <td>M{size.d} × {size.coarse}</td>
+                  <td>{trimNum(thread.As, 1)}</td>
+                  <td>{trimNum(result.proofKn, 1)}</td>
+                  <td>{result.fromPercentKn == null ? "—" : trimNum(result.fromPercentKn, 1)}</td>
+                  <td>{result.torqueFromPreloadNm == null ? "—" : trimNum(result.torqueFromPreloadNm, 1)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="toolNote">Structural installation methods — tension-control bolts, direct tension indicators, turn-of-nut — belong to the bolting standard and the project specification. They are not this torque estimate, and they are not mixed with an ordinary machine-bolt K.</p>
+    </>
+  )
+}
+
+function numOrNull(raw: string): number | null {
+  if (!raw.trim()) return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+
+========================================================================
+FILE src/components/unit-tool.tsx
+========================================================================
+
+import { useEffect, useMemo, useState } from "react"
+import { parseStrictNumber } from "../reference/format.ts"
+import { ConvertError, convert, incompatibility } from "../units/converter.ts"
+import { CATEGORIES, unitsInCategory, type UnitDef } from "../units/definitions.ts"
+import { formatValue, precise, type Notation } from "../units/format.ts"
+import { parseQuantity } from "../units/parser.ts"
+
+const FAV_KEY = "iqeg-ref-unit-favs"
+const RECENT_KEY = "iqeg-ref-unit-recent"
+const DEFAULT_FAVS = ["pressure", "force", "vol-flow", "power", "density", "angular", "area-inertia", "section-modulus", "length"]
+const SIGS = [2, 3, 4, 5, 6, 8]
+
+export function UnitTool({ initialQuery }: { initialQuery: string }) {
+  const [categoryId, setCategoryId] = useState("pressure")
+  const [activeId, setActiveId] = useState("pressure:MPa")
+  const [text, setText] = useState("1")
+  const [notation, setNotation] = useState<Notation>("eng")
+  const [sig, setSig] = useState(4)
+  const [filter, setFilter] = useState("")
+  const [error, setError] = useState("")
+  const [favs, setFavs] = useState(DEFAULT_FAVS)
+  const [recent, setRecent] = useState<string[]>([])
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(FAV_KEY)
+      if (saved) setFavs(JSON.parse(saved) as string[])
+      const rec = localStorage.getItem(RECENT_KEY)
+      if (rec) setRecent(JSON.parse(rec) as string[])
+    } catch {
+      /* ignore broken local storage */
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!initialQuery) return
+    applySmart(initialQuery)
+    // only when the routed query changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQuery])
+
+  const units = unitsInCategory(categoryId)
+  const active = units.find((unit) => unit.id === activeId) ?? units[0]
+
+  const parsed = useMemo(() => {
+    if (!active) return { ok: false as const, message: "Unknown unit." }
+    try {
+      const value = parseStrictNumber(text)
+      return { ok: true as const, value }
+    } catch (err) {
+      return { ok: false as const, message: err instanceof Error ? err.message : "Invalid number." }
+    }
+  }, [text, active])
+
+  useEffect(() => {
+    if (!parsed.ok || !active) return
+    const handle = window.setTimeout(() => {
+      try {
+        const shown = formatValue(parsed.value, sig, notation)
+        const line = `${shown} ${active.symbol}`
+        setRecent((prev) => {
+          const next = [line, ...prev.filter((item) => item !== line)].slice(0, 8)
+          localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+          return next
+        })
+      } catch {
+        /* storage full or blocked */
+      }
+    }, 600)
+    return () => window.clearTimeout(handle)
+  }, [parsed, active, sig, notation])
+
+  function applySmart(raw: string) {
+    try {
+      const hit = parseQuantity(raw)
+      if (!hit) {
+        setError("Unknown unit.")
+        return
+      }
+      setError("")
+      setCategoryId(hit.unit.category)
+      setActiveId(hit.to?.id && hit.to.category === hit.unit.category ? hit.unit.id : hit.unit.id)
+      setText(String(hit.value))
+      if (hit.to && hit.to.category !== hit.unit.category) {
+        const why = incompatibility(hit.unit, hit.to)
+        setError(why ?? "Those units are not in the same table.")
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid number.")
+    }
+  }
+
+  function converted(unit: UnitDef): string {
+    if (!parsed.ok || !active) return "—"
+    try {
+      return formatValue(convert(parsed.value, active.id, unit.id), sig, notation)
+    } catch (err) {
+      return err instanceof ConvertError ? "—" : "—"
+    }
+  }
+
+  function activate(unit: UnitDef) {
+    if (!parsed.ok || !active) {
+      setActiveId(unit.id)
+      return
+    }
+    try {
+      const value = convert(parsed.value, active.id, unit.id)
+      setActiveId(unit.id)
+      setText(precise(value))
+      setError("")
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid conversion.")
+    }
+  }
+
+  function toggleFav(id: string) {
+    setFavs((prev) => {
+      const next = prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+      localStorage.setItem(FAV_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+
+  const shownCats = CATEGORIES.filter((cat) => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return true
+    return cat.label.toLowerCase().includes(q) || cat.group.toLowerCase().includes(q)
+  })
+  let group = ""
+  return (
+    <>
+      <div className="titleBlock">
+        <div className="tbLogo">IQEG</div>
+        <div className="tbMid">
+          <p className="tbKicker">IQEG REFERENCE LAB</p>
+          <h1 className="tbName">Unit conversion</h1>
+        </div>
+        <div className="tbMeta">
+          <span>IQ-REF-002</span>
+          <span>REV 0 · INDICATIVE</span>
+          <span>NOT A CERTIFICATE</span>
+        </div>
+      </div>
+      <form className="command" onSubmit={(event) => { event.preventDefault(); applySmart((event.currentTarget.elements.namedItem("smart") as HTMLInputElement).value) }}>
+        <input name="smart" className="refSearch" placeholder="350 MPa to psi    ·    7850 kg/m3    ·    1450 rpm" aria-label="Convert a written quantity" />
+        <button className="toolBtn" type="submit">CONVERT</button>
+      </form>
+      {error ? <p className="failBanner">{error}</p> : null}
+      <div className="topicChips">
+        {favs.map((id) => {
+          const cat = CATEGORIES.find((item) => item.id === id)
+          if (!cat) return null
+          return (
+            <button key={id} type="button" className={categoryId === id ? "on" : ""} onClick={() => { setCategoryId(id); const first = unitsInCategory(id)[0]; if (first) setActiveId(first.id) }}>
+              {cat.label}
+            </button>
+          )
+        })}
+      </div>
+      <div className="toolLayout" style={{ marginTop: 14 }}>
+        <section className="toolPanel">
+          <h2>What to convert</h2>
+          <input className="toolField" placeholder="Find a quantity, such as stress" aria-label="Filter quantities" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <div className="catList" style={{ marginTop: 10 }}>
+            {shownCats.map((cat) => {
+              const head = cat.group !== group
+              group = cat.group
+              return (
+                <span key={cat.id}>
+                  {head ? <span className="groupLabel" style={{ display: "block", padding: "8px 12px 0" }}>{cat.group}</span> : null}
+                  <button type="button" className={cat.id === categoryId ? "on" : ""} onClick={() => { setCategoryId(cat.id); const first = unitsInCategory(cat.id)[0]; if (first) setActiveId(first.id); setError("") }}>
+                    <small>{cat.group}</small>
+                    {cat.label}
+                  </button>
+                </span>
+              )
+            })}
+          </div>
+        </section>
+        <section className="toolPanel">
+          <h2>Your number</h2>
+          <p className="identity"><b>{CATEGORIES.find((c) => c.id === categoryId)?.label}</b><span>{CATEGORIES.find((c) => c.id === categoryId)?.blurb}</span></p>
+          <label className="field">
+            <span>VALUE</span>
+            <input className="toolField" value={text} onChange={(e) => { setText(e.target.value); setError("") }} />
+          </label>
+          <label className="field">
+            <span>BASELINE UNIT</span>
+            <select
+              className="toolSelect"
+              aria-label="Baseline unit"
+              value={active?.id ?? ""}
+              onChange={(e) => {
+                const unit = units.find((item) => item.id === e.target.value)
+                if (unit) activate(unit)
+              }}
+            >
+              {units.map((unit) => (
+                <option key={unit.id} value={unit.id}>{unit.symbol} — {unit.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="fieldGrid" style={{ marginTop: 10 }}>
+            <label className="field">
+              <span>NOTATION</span>
+              <select className="toolSelect" value={notation} onChange={(e) => setNotation(e.target.value as Notation)}>
+                <option value="eng">Engineering</option>
+                <option value="sci">Scientific</option>
+                <option value="fixed">Fixed decimal</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>{notation === "fixed" ? "DECIMAL PLACES" : "SIGNIFICANT FIGURES"}</span>
+              <select className="toolSelect" value={sig} onChange={(e) => setSig(Number(e.target.value))}>
+                {SIGS.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+          </div>
+          <div className="toolToolbar">
+            <button className="toolBtn ghost" type="button" onClick={() => toggleFav(categoryId)}>
+              {favs.includes(categoryId) ? "REMOVE FROM BAR" : "PIN TO BAR"}
+            </button>
+          </div>
+          {recent.length > 0 ? (
+            <>
+              <p className="groupLabel">RECENT</p>
+              <ul className="recent">{recent.map((line) => <li key={line}>{line}</li>)}</ul>
+            </>
+          ) : null}
+        </section>
+        <section className="toolPanel">
+          <h2>Converted values</h2>
+          {units.map((unit) => {
+            const value = unit.id === active?.id && parsed.ok ? formatValue(parsed.value, sig, notation) : converted(unit)
+            return (
+              <div key={unit.id} className={unit.id === active?.id ? "unitRow active" : "unitRow"}>
+                <strong>{unit.symbol}</strong>
+                <input
+                  aria-label={unit.name}
+                  value={unit.id === active?.id ? text : value}
+                  onFocus={() => { if (unit.id !== active?.id) activate(unit) }}
+                  onChange={(e) => { setActiveId(unit.id); setText(e.target.value); setError("") }}
+                />
+                <button className="copyBtn" type="button" onClick={() => void navigator.clipboard.writeText(value)}>COPY</button>
+                <button className="copyBtn" type="button" onClick={() => void navigator.clipboard.writeText(`${value} ${unit.symbol}`)}>WITH UNIT</button>
+              </div>
+            )
+          })}
+          <p className="toolNote">The baseline unit is the one selected above. Changing it keeps the same physical quantity and rewrites the number. Any row can also become the baseline. Display rounding is not stored. US gallon and Imperial gallon are different.</p>
+        </section>
+      </div>
+    </>
+  )
+}
+
+
+========================================================================
+FILE src/plate/as4100-d1.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { solvePlateFem } from "./fem.ts"
+import { staleAssignments, withoutStale, type AssignmentLink } from "./standards/as4100/assignment.ts"
+import { evaluateAs4100 } from "./standards/as4100/evaluate.ts"
+import { alphaC } from "./standards/as4100/member.ts"
+import { AS4100_META } from "./standards/as4100/shared.ts"
+import { alphaD, alphaVStiffened, alphaVUnstiffened } from "./standards/as4100/shear.ts"
+
+/** Clause 6.3.3 written out here. Not a call through a shared helper. */
+function alphaIndependent(lambdaN: number, alphaB: number): number {
+  const alphaA = (2100 * (lambdaN - 13.5)) / (lambdaN * lambdaN - 15.3 * lambdaN + 2050)
+  const lambda = lambdaN + alphaA * alphaB
+  if (!(lambda > 0)) return 1
+  const eta = Math.max(0, 0.00326 * (lambda - 13.5))
+  const ratio = lambda / 90
+  const xi = (ratio * ratio + 1 + eta) / (2 * ratio * ratio)
+  const inside = 1 - (90 / (xi * lambda)) ** 2
+  if (!(inside >= 0) || !Number.isFinite(xi)) return 1
+  return Math.min(1, xi * (1 - Math.sqrt(inside)))
+}
+
+/** Clause 5.11.5.2 product αv αd, or unstiffened αv when s/dp > 3. Written out here. */
+function shearProduct(slenderness: number, sOverDp: number): number {
+  const base = (82 / slenderness) ** 2
+  if (sOverDp > 3) return base
+  const factor = sOverDp <= 1 ? 1 / sOverDp ** 2 + 0.75 : 0.75 / sOverDp ** 2 + 1
+  const av = Math.min(1, base * factor)
+  const ad = 1 + (1 - av) / (1.15 * av * Math.sqrt(1 + sOverDp ** 2))
+  return av * ad
+}
+
+test("D1.0 identity is frozen", () => {
+  assert.equal(AS4100_META.freeze, "IQ-PLB-AS4100-D1.0")
+  assert.equal(AS4100_META.edition, "2020")
+  assert.equal(AS4100_META.amendment, "1")
+})
+
+test("Table 6.3.3(C) readable cells match Clause 6.3.3", () => {
+  const cells: [number, number, number][] = [
+    [0, -1, 1], [0, 0, 1], [0, 1, 1],
+    [10, -1, 1], [10, 1, 1],
+    [30, -1, 0.991], [30, -0.5, 0.968], [30, 0, 0.943], [30, 0.5, 0.917], [30, 1, 0.888],
+    [35, -1, 0.983], [35, -0.5, 0.955], [35, 0, 0.925], [35, 0.5, 0.891], [35, 1, 0.853],
+    [40, -1, 0.973], [40, -0.5, 0.94], [40, 0, 0.905], [40, 0.5, 0.865], [40, 1, 0.818],
+    [90, -1, 0.737], [90, -0.5, 0.675], [90, 0, 0.61], [90, 0.5, 0.547], [90, 1, 0.487],
+  ]
+  let maxAbs = 0
+  let maxRel = 0
+  for (const [lambdaN, alphaB, printed] of cells) {
+    const code = alphaC(lambdaN, alphaB)
+    const own = alphaIndependent(lambdaN, alphaB)
+    assert.ok(Math.abs(code - own) < 1e-12, "production and independent closed forms diverged")
+    const diff = Math.abs(code - printed)
+    maxAbs = Math.max(maxAbs, diff)
+    maxRel = Math.max(maxRel, printed === 0 ? diff : diff / printed)
+    assert.ok(diff < 0.0015, `${lambdaN},${alphaB} code ${code} table ${printed}`)
+  }
+  assert.ok(maxAbs < 0.0015)
+  assert.ok(maxRel < 0.002)
+})
+
+test("Table 5.11.5.2 matches the Clause 5.11.5.2 equations except two transposed cells", () => {
+  const cols = [0.3, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+  const rows: [number, number[]][] = [
+    [90, [1, 1, 1, 1, 1, 1, 1, 0.991, 0.952, 0.927]],
+    [100, [1, 1, 1, 1, 0.989, 0.946, 0.907, 0.877, 0.833, 0.803]],
+    [110, [1, 1, 1, 0.998, 0.919, 0.866, 0.825, 0.792, 0.744, 0.711]],
+    [140, [1, 1, 0.96, 0.846, 0.775, 0.719, 0.674, 0.638, 0.583, 0.544]],
+    [170, [1, 1, 0.875, 0.772, 0.701, 0.643, 0.596, 0.558, 0.499, 0.458]],
+    [180, [1, 0.997, 0.855, 0.755, 0.684, 0.626, 0.578, 0.539, 0.48, 0.438]],
+    [190, [1, 0.974, 0.839, 0.74, 0.669, 0.611, 0.563, 0.524, 0.464, 0.421]],
+  ]
+  const transposed = new Set(["100|1.25", "110|1"])
+  for (const [sl, printed] of rows) {
+    cols.forEach((spacing, index) => {
+      const formula = Math.min(1, shearProduct(sl, spacing))
+      const code = spacing > 3
+        ? alphaVUnstiffened(sl, 250)
+        : alphaVStiffened(sl, 250, spacing) * alphaD(alphaVStiffened(sl, 250, spacing), spacing, false)
+      assert.ok(Math.abs(code - formula) < 1e-9)
+      const key = `${sl}|${spacing}`
+      const diff = Math.abs(formula - printed[index]!)
+      if (transposed.has(key)) {
+        assert.ok(diff > 0.005 && diff < 0.012, key)
+      } else {
+        assert.ok(diff < 0.0015, `${key} formula ${formula.toFixed(4)} table ${printed[index]}`)
+      }
+    })
+  }
+  assert.ok(Math.abs(shearProduct(100, 1.25) - 0.9978) < 0.001)
+  assert.ok(Math.abs(shearProduct(110, 1) - 0.9894) < 0.001)
+  assert.ok(Math.abs((82 / 100) ** 2 - 0.6724) < 1e-4)
+})
+
+test("plate class changes on the Table 5.2 limits and effective width stays continuous", () => {
+  const at = (b: number) => evaluateAs4100({
+    role: "element", clearWidthMm: b, thicknessMm: 10, fyMpa: 250, residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "none",
+  })
+  const compact = at(300)
+  const justCompact = at(300 - 1e-4)
+  const onYield = at(450)
+  const justNonCompact = at(300 + 1e-4)
+  const justSlender = at(450 + 1e-4)
+  assert.match(compact.checks.find((row) => row.id === "slenderness")?.result ?? "", /COMPACT/)
+  assert.match(justCompact.checks.find((row) => row.id === "slenderness")?.result ?? "", /COMPACT/)
+  assert.match(justNonCompact.checks.find((row) => row.id === "slenderness")?.result ?? "", /NON-COMPACT/)
+  assert.match(onYield.checks.find((row) => row.id === "slenderness")?.result ?? "", /NON-COMPACT/)
+  assert.match(justSlender.checks.find((row) => row.id === "slenderness")?.result ?? "", /SLENDER/)
+  assert.equal(onYield.diagram.effectiveMm, 450)
+  assert.equal(justNonCompact.diagram.effectiveMm, 300 + 1e-4)
+  // Clause 6.2.4 primary width: be = b (λey/λe) ≤ b = λey t / √(fy/250) once slender.
+  // fy = 250, t = 10, λey = 45 → the slender plateau is exactly 450 mm for every b > 450.
+  // That meets the yield-limit width, so be is continuous. It is not a drop below 450.
+  const plateau = 45 * 10
+  assert.ok(Math.abs((justSlender.diagram.effectiveMm ?? NaN) - plateau) < 1e-6)
+  assert.ok((justSlender.diagram.effectiveMm ?? 0) < 450 + 1e-4)
+  const moderate = at(460)
+  assert.match(moderate.checks.find((row) => row.id === "slenderness")?.result ?? "", /SLENDER/)
+  assert.ok(Math.abs((moderate.diagram.effectiveMm ?? NaN) - plateau) < 1e-6)
+  assert.ok((moderate.diagram.effectiveMm ?? 0) < 460)
+  const stocky = at(100)
+  assert.equal(stocky.diagram.effectiveMm, 100)
+  const very = at(2000)
+  assert.ok((very.diagram.effectiveMm ?? 0) < 2000)
+  assert.ok((very.diagram.effectiveMm ?? 1) > 0)
+})
+
+test("effective width does not grow as slenderness grows, and kf stays in (0, 1]", () => {
+  const widths: number[] = []
+  for (const fy of [250, 300, 350, 450]) {
+    const report = evaluateAs4100({
+      role: "element", clearWidthMm: 500, thicknessMm: 8, fyMpa: fy, residual: "HW",
+      edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "compression",
+    })
+    widths.push(report.diagram.effectiveMm ?? 0)
+    const axial = report.checks.find((row) => row.id === "axial")
+    const be = report.diagram.effectiveMm ?? 0
+    assert.ok(be <= 500)
+    const kf = (be * 8) / (500 * 8)
+    assert.ok(kf > 0 && kf <= 1)
+    assert.match(axial?.equation ?? "", /Ns/)
+    assert.doesNotMatch(axial?.equation ?? "", /Nc/)
+  }
+  assert.ok(widths[1]! < widths[0]!)
+  assert.ok(widths[2]! < widths[1]!)
+  assert.ok(widths[3]! < widths[2]!)
+})
+
+test("published 300×10 and 500×8 results from first principles", () => {
+  const lambda = (300 / 10) * Math.sqrt(350 / 250)
+  assert.ok(Math.abs(lambda - 35.496478698) < 1e-6)
+  const plate = evaluateAs4100({
+    role: "element", clearWidthMm: 300, thicknessMm: 10, fyMpa: 350, residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "none",
+  })
+  assert.match(plate.checks.find((row) => row.id === "slenderness")?.result ?? "", /NON-COMPACT/)
+  assert.equal(plate.diagram.effectiveMm, 300)
+  const slenderLambda = (500 / 8) * Math.sqrt(350 / 250)
+  const be = 500 * (35 / slenderLambda)
+  const ns = be * 8 * 350
+  const report = evaluateAs4100({
+    role: "element", clearWidthMm: 500, thicknessMm: 8, fyMpa: 350, residual: "HW",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "compression",
+  })
+  assert.ok(Math.abs((report.diagram.effectiveMm ?? 0) - be) < 1e-6)
+  assert.ok(Math.abs((report.checks.find((row) => row.id === "axial")?.nominal ?? 0) - ns) < 0.05)
+  assert.ok(Math.abs((report.checks.find((row) => row.id === "axial")?.designCapacity ?? 0) - 0.9 * ns) < 0.05)
+  assert.equal(report.checks.find((row) => row.id === "axial")?.phi, 0.9)
+})
+
+test("tension ignores compression slenderness and needs kt", () => {
+  const report = evaluateAs4100({
+    role: "element", clearWidthMm: 500, thicknessMm: 8, fyMpa: 350, fuMpa: 480, residual: "HW",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "tension", kt: 1, nStarN: -100000,
+  })
+  const axial = report.checks.find((row) => row.id === "axial")
+  assert.equal(axial?.nominal, 1_400_000)
+  assert.equal(axial?.designCapacity, 1_260_000)
+  assert.equal(axial?.status, "pass")
+  const missing = evaluateAs4100({
+    role: "element", clearWidthMm: 500, thicknessMm: 8, fyMpa: 350, fuMpa: 480, residual: "HW",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "tension",
+  })
+  assert.equal(missing.checks.find((row) => row.id === "axial")?.status, "data-required")
+  assert.equal(missing.overall, "not-complete")
+})
+
+test("net area above gross area is invalid and is not replaced by Ag", () => {
+  const report = evaluateAs4100({
+    role: "element", clearWidthMm: 200, thicknessMm: 10, fyMpa: 250, fuMpa: 410, residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", holes: "net", anMm2: 2500, axial: "compression",
+  })
+  const axial = report.checks.find((row) => row.id === "axial")
+  assert.equal(axial?.status, "invalid")
+  assert.equal(axial?.nominal, null)
+  assert.equal(report.overall, "not-complete")
+  assert.doesNotMatch(report.headline, /PASS FOR ALL/)
+})
+
+test("scope boundaries: 3 mm and 690 MPa", () => {
+  const element = (t: number, fy: number) => evaluateAs4100({
+    role: "element", clearWidthMm: 200, thicknessMm: t, fyMpa: fy, residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "none",
+  }).checks.find((row) => row.id === "slenderness")?.status
+  assert.equal(element(3 - 1e-4, 350), "out-of-scope")
+  assert.equal(element(3, 350), "pass")
+  assert.equal(element(3 + 1e-4, 350), "pass")
+  assert.equal(element(10, 690), "pass")
+  assert.equal(element(10, 690 + 0.001), "out-of-scope")
+  const shear = (tw: number, fy: number) => evaluateAs4100({
+    role: "web", dpMm: 400, twMm: tw, fyMpa: fy, webGross: "gross", stiffening: "unstiffened",
+    shearMode: "uniform", d1Mm: 400, webBound: "both-flanges", axial: "none", bearing: "none",
+    stiffener: "none", interaction: "none", openings: "none", vStarN: 1000,
+  })
+  assert.equal(shear(2.999, 250).checks.find((row) => row.id === "shear")?.status, "out-of-scope")
+  assert.equal(shear(3, 250).overall, "pass")
+  assert.equal(shear(8, 690.001).overall, "not-complete")
+  assert.doesNotMatch(shear(8, 700).headline, /PASS FOR ALL/)
+})
+
+test("web thickness and shear use dp for the stiffener trigger and d1 in the thickness formula", () => {
+  const crossed = evaluateAs4100({
+    role: "web", d1Mm: 600, dpMm: 800, twMm: 8, sMm: 2000, fyMpa: 250,
+    webBound: "both-flanges", stiffening: "transverse", webGross: "gross", shearMode: "uniform",
+    axial: "none", bearing: "none", stiffener: "none", interaction: "none", openings: "none",
+  })
+  assert.equal(crossed.checks.find((row) => row.id === "web-thickness")?.status, "out-of-scope")
+  assert.match(crossed.checks.find((row) => row.id === "web-thickness")?.note ?? "", /s\/d1/)
+  const dpBased = Math.min(0.6 * 250 * 800 * 8, shearProduct(100, 2) * 0.6 * 250 * 800 * 8)
+  const d1Based = Math.min(0.6 * 250 * 800 * 8, shearProduct(75, 1600 / 600) * 0.6 * 250 * 800 * 8)
+  const shear = evaluateAs4100({
+    role: "web", d1Mm: 600, dpMm: 800, twMm: 8, sMm: 1600, fyMpa: 250,
+    webBound: "both-flanges", stiffening: "transverse", webGross: "gross", shearMode: "uniform",
+    axial: "none", bearing: "none", stiffener: "none", interaction: "none", openings: "none", vStarN: 1,
+  })
+  const nominal = shear.checks.find((row) => row.id === "shear")?.nominal ?? 0
+  assert.ok(Math.abs(nominal - dpBased) < 1)
+  assert.ok(Math.abs(nominal - d1Based) > 1000)
+})
+
+test("shear yield and buckling meet at dp/tw = 82/√(fy/250)", () => {
+  const fy = 250
+  const limit = 82 / Math.sqrt(fy / 250)
+  const at = (dp: number) => evaluateAs4100({
+    role: "web", dpMm: dp, twMm: 10, fyMpa: fy, webGross: "gross", stiffening: "unstiffened",
+    shearMode: "uniform", d1Mm: dp, webBound: "both-flanges",
+  }).checks.find((row) => row.id === "shear")
+  const below = at(limit * 10 - 0.01)
+  const on = at(limit * 10)
+  const above = at(limit * 10 + 0.01)
+  assert.match(below?.title ?? "", /yield/)
+  assert.match(on?.title ?? "", /yield/)
+  assert.match(above?.title ?? "", /buckling/)
+  assert.ok(Math.abs((on?.nominal ?? 0) - (above?.nominal ?? 0)) / (on?.nominal ?? 1) < 0.001)
+  const s3 = evaluateAs4100({
+    role: "web", dpMm: 1000, twMm: 8, sMm: 3000, fyMpa: 250, webGross: "gross", stiffening: "transverse",
+    shearMode: "uniform", d1Mm: 1000, webBound: "both-flanges",
+  }).checks.find((row) => row.id === "shear")?.nominal
+  const s3plus = evaluateAs4100({
+    role: "web", dpMm: 1000, twMm: 8, sMm: 3000.01, fyMpa: 250, webGross: "gross", stiffening: "transverse",
+    shearMode: "uniform", d1Mm: 1000, webBound: "both-flanges",
+  }).checks.find((row) => row.id === "shear")?.nominal
+  assert.ok(s3 != null && s3plus != null)
+  assert.ok(s3 > s3plus)
+})
+
+test("opening limits 0.10 and 0.33 change on the printed side of the limit", () => {
+  const open = (ratio: number, stiffened: boolean) => evaluateAs4100({
+    role: "web", openings: "open", lwMm: ratio * 500, d1Mm: 500, openingStiffened: stiffened,
+    dpMm: 500, twMm: 10, fyMpa: 250,
+  }).checks.find((row) => row.id === "openings")
+  assert.equal(open(0.1 - 1e-6, false)?.status, "pass")
+  assert.equal(open(0.1, false)?.status, "pass")
+  assert.equal(open(0.1 + 1e-4, false)?.status, "fail")
+  assert.equal(open(0.33, false)?.status, "fail")
+  assert.equal(open(0.33, true)?.status, "pass")
+  assert.equal(open(0.33 + 1e-4, true)?.status, "fail")
+  assert.match(open(0.2, true)?.note ?? "", /castellated|stiffened opening/i)
+})
+
+test("Clause 5.12.3 is continuous at 0.75 φMs and does not govern without V*", () => {
+  const ms = 1e8
+  const phi = 0.9
+  const vv = 0.6 * 250 * 400 * 10
+  const web = {
+    role: "web" as const, dpMm: 400, twMm: 10, fyMpa: 250, webGross: "gross" as const,
+    stiffening: "unstiffened" as const, shearMode: "uniform" as const, interaction: "section" as const,
+    msNmm: ms, d1Mm: 400, webBound: "both-flanges" as const,
+  }
+  const at = (m: number, v: number | null) => evaluateAs4100({ ...web, mStarNmm: m, vStarN: v ?? undefined })
+  const low = at(0.75 * phi * ms, 1000)
+  const high = at(0.75 * phi * ms + 1, 1000)
+  assert.ok(Math.abs((low.checks.find((row) => row.id === "interaction")?.nominal ?? 0) - vv) < 1)
+  assert.ok((high.checks.find((row) => row.id === "interaction")?.nominal ?? vv) < vv)
+  const noShear = at(0.8 * phi * ms, null)
+  assert.equal(noShear.checks.find((row) => row.id === "interaction")?.utilisation, null)
+  assert.equal(noShear.governingUtil, null)
+})
+
+test("bearing example is section yield, not the patch eigenvalue, and stiffened webs are outside 5.13.4", () => {
+  const report = evaluateAs4100({
+    role: "web", bearing: "ic", stiffening: "unstiffened", bbfMm: 100, bbMm: 500, twMm: 10, fyMpa: 300,
+    d1Mm: 200, flangesRestrained: true, rStarN: 200000,
+  })
+  const row = report.checks.find((item) => item.id === "bearing")
+  assert.equal(row?.nominal, 375000)
+  assert.equal(row?.designCapacity, 337500)
+  assert.equal(row?.phi, 0.9)
+  const again = evaluateAs4100({
+    role: "web", bearing: "ic", stiffening: "unstiffened", bbfMm: 100, bbMm: 500, twMm: 10, fyMpa: 300,
+    d1Mm: 200, flangesRestrained: true, rStarN: 200000,
+  })
+  assert.equal(again.checks.find((item) => item.id === "bearing")?.nominal, row?.nominal)
+  const stiffened = evaluateAs4100({
+    role: "web", bearing: "ic", stiffening: "transverse", bbfMm: 100, bbMm: 500, twMm: 10, fyMpa: 300, d1Mm: 200,
+  })
+  assert.equal(stiffened.checks.find((item) => item.id === "bearing")?.status, "out-of-scope")
+  assert.equal(stiffened.overall, "not-complete")
+})
+
+test("Clause 5.15.5 printed second limit is 1.5 d1³ tw³ / s²", () => {
+  const d1 = 1000
+  const tw = 10
+  const s = 2000
+  const printed = 1.5 * d1 ** 3 * tw ** 3 / s ** 2
+  const equivalent = 1.5 * d1 * tw ** 3 / (s / d1) ** 2
+  assert.equal(printed, equivalent)
+  assert.equal(printed, 375000)
+  const report = evaluateAs4100({
+    role: "web", stiffener: "intermediate", arrangement: "pair", d1Mm: d1, twMm: tw, dpMm: d1, sMm: s,
+    fyMpa: 250, fysMpa: 250, webGross: "gross", stiffening: "transverse", shearMode: "uniform",
+    isMm4: printed, asMm2: 1600, tsMm: 10, besMm: 80,
+  })
+  assert.equal(report.checks.find((row) => row.id === "stiffener-stiffness")?.status, "pass")
+  assert.match(report.checks.find((row) => row.id === "stiffener-stiffness")?.steps.join(" ") ?? "", /1\.5 d1³ tw³ \/ s²/)
+})
+
+test("a missing applicable check is not a complete pass, and Appendix I cannot govern", () => {
+  const base = {
+    role: "web" as const, dpMm: 400, twMm: 10, fyMpa: 250, webGross: "gross" as const,
+    stiffening: "unstiffened" as const, shearMode: "uniform" as const, d1Mm: 400, webBound: "both-flanges" as const,
+    axial: "none" as const, bearing: "none" as const, stiffener: "none" as const, openings: "none" as const,
+    vStarN: 1000,
+  }
+  const omitted = evaluateAs4100(base)
+  assert.equal(omitted.checks.find((row) => row.id === "interaction")?.status, "not-checked")
+  assert.equal(omitted.overall, "not-complete")
+  assert.match(omitted.headline, /NOT A COMPLETE PASS/)
+  const full = evaluateAs4100({ ...base, interaction: "none" })
+  assert.equal(full.overall, "pass")
+  const withAppendix = evaluateAs4100({
+    ...base, interaction: "none", appendixI: true, bbfMm: 100, sMm: 400,
+    mwNmm: 1e12, vwN: 1e12, nwN: 1e12, rwN: 1e12,
+  })
+  assert.equal(withAppendix.checks.find((row) => row.id === "appendix-i")?.normative, false)
+  assert.equal(withAppendix.overall, full.overall)
+  assert.equal(withAppendix.governingUtil, full.governingUtil)
+})
+
+test("invalid geometry never returns a pass", () => {
+  for (const bad of [
+    { thicknessMm: 0 },
+    { thicknessMm: -5 },
+    { fyMpa: Number.NaN },
+    { clearWidthMm: Number.POSITIVE_INFINITY },
+    { vStarN: -10 },
+  ]) {
+    const report = evaluateAs4100({
+      role: "element", clearWidthMm: 200, thicknessMm: 10, fyMpa: 250, residual: "HR",
+      edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "none",
+      ...bad,
+    })
+    assert.equal(report.checks.some((row) => row.status === "pass" && row.kind === "strength"), false)
+    assert.notEqual(report.overall, "pass")
+    assert.equal(report.checks[0]?.status, "invalid")
+  }
+})
+
+test("the same physical plate in mm/MPa/N and in converted units", () => {
+  const mm = evaluateAs4100({
+    role: "element", clearWidthMm: 300, thicknessMm: 10, fyMpa: 350, residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "compression", nStarN: 500000,
+  })
+  const fromMetres = evaluateAs4100({
+    role: "element",
+    clearWidthMm: 0.3 * 1000,
+    thicknessMm: 0.01 * 1000,
+    fyMpa: 0.35 * 1000,
+    residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "compression",
+    nStarN: 500 * 1000,
+  })
+  assert.equal(fromMetres.checks.find((row) => row.id === "axial")?.nominal, mm.checks.find((row) => row.id === "axial")?.nominal)
+  assert.equal(fromMetres.checks.find((row) => row.id === "axial")?.utilisation, mm.checks.find((row) => row.id === "axial")?.utilisation)
+  const nsN = mm.checks.find((row) => row.id === "axial")?.nominal ?? 0
+  assert.ok(Math.abs(nsN / 1000 - 1050) < 0.01)
+})
+
+test("assignments do not silently follow the panel, and a geometry change is stale", () => {
+  const panel = { aMm: 2000, bMm: 800, tMm: 10, fyMpa: 350, fuMpa: 480 }
+  assert.deepEqual(staleAssignments([], panel), [])
+  const link: AssignmentLink = { field: "dpMm", source: "bMm", captured: 800 }
+  assert.deepEqual(staleAssignments([link], panel), [])
+  const design = withoutStale({ dpMm: 800, twMm: 10 }, [])
+  assert.equal(design.dpMm, 800)
+  const moved = staleAssignments([link], { ...panel, bMm: 900 })
+  assert.equal(moved.length, 1)
+  const dropped = withoutStale({ dpMm: 800, twMm: 10 }, moved)
+  assert.equal("dpMm" in dropped, false)
+  assert.equal(dropped.twMm, 10)
+  const reassigned: AssignmentLink = { field: "d1Mm", source: "bMm", captured: 900 }
+  assert.equal(staleAssignments([reassigned], { ...panel, bMm: 900 }).length, 0)
+  assert.equal(staleAssignments([], { ...panel, bMm: 1 }).length, 0)
+})
+
+test("design settings do not move IQ-PLB-E1.0, and kb is not filled from σcr", () => {
+  const input = {
+    aMm: 1000, bMm: 800, tMm: 10, eMpa: 210000, nu: 0.3,
+    sigma1Mpa: 80, psi: 1, tauMpa: 20, nx: 6, ny: 6,
+    edges: { x0: "ss" as const, x1: "ss" as const, y0: "ss" as const, y1: "ss" as const },
+    krNPerRadPerMm: 0, modes: 1,
+  }
+  const before = solvePlateFem(input)
+  const primary = evaluateAs4100({
+    role: "element", clearWidthMm: 500, thicknessMm: 8, fyMpa: 350, residual: "HW",
+    edgesSupported: "both", stress: "uniform-compression", kb: before.modes[0]?.sigma1CrMpa ?? 99, widthPath: "primary",
+  })
+  const plain = evaluateAs4100({
+    role: "element", clearWidthMm: 500, thicknessMm: 8, fyMpa: 350, residual: "HW",
+    edgesSupported: "both", stress: "uniform-compression", widthPath: "primary",
+  })
+  assert.equal(primary.diagram.effectiveMm, plain.diagram.effectiveMm)
+  const after = solvePlateFem(input)
+  assert.equal(after.modes[0]?.lambda, before.modes[0]?.lambda)
+  assert.equal(after.modes[0]?.sigma1CrMpa, before.modes[0]?.sigma1CrMpa)
+  assert.equal(after.modes[0]?.tauCrMpa, before.modes[0]?.tauCrMpa)
+})
+
+test("service deformation does not veto a strength pass and does not govern", () => {
+  const report = evaluateAs4100({
+    role: "element", clearWidthMm: 1000, thicknessMm: 10, fyMpa: 250, residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", holes: "none", axial: "none",
+  })
+  assert.equal(report.checks.find((row) => row.id === "deformation")?.status, "fail")
+  assert.equal(report.checks.find((row) => row.id === "deformation")?.kind, "service")
+  assert.equal(report.overall, "pass")
+  assert.match(report.headline, /SERVICE DEFORMATION WARNING/)
+  assert.match(report.headline, /NOT COMPLETE AS 4100/)
+  assert.equal(report.governingUtil, null)
+})
+
+
+========================================================================
+FILE src/plate/as4100-design.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { designChecks } from "./codes/dispatch.ts"
+import { solvePlateFem } from "./fem.ts"
+import { alphaC } from "./standards/as4100/member.ts"
+import { productAlpha } from "./standards/as4100/shear.ts"
+import { evaluateAs4100 } from "./standards/as4100/evaluate.ts"
+
+const SS = { x0: "ss" as const, x1: "ss" as const, y0: "ss" as const, y1: "ss" as const }
+
+test("Table 6.3.3(C) cells match the Clause 6.3.3 closed form", () => {
+  const cells: [number, number, number][] = [
+    [30, -1, 0.991],
+    [30, -0.5, 0.968],
+    [30, 0, 0.943],
+    [30, 0.5, 0.917],
+    [30, 1, 0.888],
+    [90, -1, 0.737],
+    [90, -0.5, 0.675],
+    [90, 0, 0.610],
+    [90, 0.5, 0.547],
+    [90, 1, 0.487],
+  ]
+  for (const [lambdaN, alphaB, published] of cells) {
+    assert.ok(Math.abs(alphaC(lambdaN, alphaB) - published) < 0.0015, `${lambdaN},${alphaB}`)
+  }
+  assert.equal(alphaC(0, 0), 1)
+})
+
+test("stiffened shear factors match Table 5.11.5.2 at (dp/tw)√(fy/250) = 90", () => {
+  assert.ok(Math.abs(productAlpha(90, 2.5) - 0.952) < 0.0015)
+  assert.ok(Math.abs(productAlpha(90, 3) - 0.927) < 0.0015)
+  assert.ok(Math.abs(productAlpha(90, 4) - (82 / 90) ** 2) < 1e-12)
+})
+
+test("flat element 300×10, fy 350, both edges, HR is non-compact and fully effective", () => {
+  const report = evaluateAs4100({
+    role: "element",
+    clearWidthMm: 300,
+    thicknessMm: 10,
+    fyMpa: 350,
+    residual: "HR",
+    edgesSupported: "both",
+    stress: "uniform-compression",
+    axial: "none",
+    holes: "none",
+  })
+  const row = report.checks.find((item) => item.id === "slenderness")
+  const width = report.checks.find((item) => item.id === "effective-width")
+  assert.match(row?.result ?? "", /NON-COMPACT/)
+  assert.match(row?.steps.join(" ") ?? "", /Table 5\.2/)
+  assert.ok(Math.abs(35.4964787 - 35.496) < 0.01)
+  assert.match(row?.steps.join(" ") ?? "", /35\.496/)
+  assert.equal(report.diagram.effectiveMm, 300)
+  assert.match(width?.clause ?? "", /6\.2\.4/)
+  assert.equal(report.overall, "pass")
+  assert.match(report.headline, /PASS FOR ALL APPLICABLE IMPLEMENTED CHECKS/)
+  assert.match(report.headline, /NOT COMPLETE AS 4100/)
+})
+
+test("heavily welded 500×8 plate uses Table 6.2.4 λey = 35", () => {
+  const report = evaluateAs4100({
+    role: "element",
+    clearWidthMm: 500,
+    thicknessMm: 8,
+    fyMpa: 350,
+    residual: "HW",
+    edgesSupported: "both",
+    stress: "uniform-compression",
+    holes: "none",
+    axial: "compression",
+  })
+  const width = report.checks.find((item) => item.id === "effective-width")
+  const axial = report.checks.find((item) => item.id === "axial")
+  assert.ok(width)
+  assert.ok(Math.abs((report.diagram.effectiveMm ?? 0) - 236.643191) < 0.001)
+  assert.match(width?.result ?? "", /236\.643/)
+  assert.ok(axial)
+  assert.match(axial?.equation ?? "", /Ns/)
+  assert.ok(Math.abs((axial?.nominal ?? 0) - 662600.936) < 0.05)
+  assert.equal(axial?.phi, 0.9)
+  assert.match(axial?.phiSource ?? "", /Table 3\.4/)
+  assert.ok(Math.abs((axial?.designCapacity ?? 0) - 596340.842) < 0.05)
+  assert.equal(axial?.status, "not-checked")
+})
+
+test("tension does not use the compression effective section", () => {
+  const report = evaluateAs4100({
+    role: "element",
+    clearWidthMm: 500,
+    thicknessMm: 8,
+    fyMpa: 350,
+    fuMpa: 480,
+    residual: "HW",
+    edgesSupported: "both",
+    stress: "uniform-compression",
+    holes: "none",
+    axial: "tension",
+    kt: 1,
+    nStarN: -100000,
+  })
+  const axial = report.checks.find((item) => item.id === "axial")
+  assert.match(axial?.clause ?? "", /7\.2/)
+  assert.match(axial?.steps.join(" ") ?? "", /not used as a tensile resistance/)
+  assert.ok(Math.abs((axial?.nominal ?? 0) - 1_400_000) < 0.1)
+  assert.ok(Math.abs((axial?.designCapacity ?? 0) - 1_260_000) < 0.1)
+  assert.ok(Math.abs((axial?.utilisation ?? 0) - 100000 / 1_260_000) < 1e-9)
+  assert.equal(axial?.status, "pass")
+})
+
+test("residual class is required and is not assumed", () => {
+  const report = evaluateAs4100({
+    role: "element",
+    clearWidthMm: 300,
+    thicknessMm: 10,
+    fyMpa: 350,
+    edgesSupported: "both",
+    stress: "uniform-compression",
+  })
+  const row = report.checks.find((item) => item.id === "slenderness")
+  assert.equal(row?.status, "data-required")
+  assert.equal(row?.result, "VERIFIED STANDARD DATA REQUIRED")
+  assert.match(row?.note ?? "", /Residual/)
+})
+
+test("unstiffened web shear, dp 800, tw 8, fy 300, V* 400 kN", () => {
+  const report = evaluateAs4100({
+    role: "web",
+    dpMm: 800,
+    twMm: 8,
+    fyMpa: 300,
+    webGross: "gross",
+    stiffening: "unstiffened",
+    shearMode: "uniform",
+    vStarN: 400000,
+    webBound: "both-flanges",
+    d1Mm: 800,
+    bearing: "none",
+    stiffener: "none",
+    interaction: "none",
+    openings: "none",
+    axial: "none",
+  })
+  const shear = report.checks.find((item) => item.id === "shear")
+  assert.match(shear?.clause ?? "", /5\.11\.5/)
+  assert.ok(Math.abs((shear?.nominal ?? 0) - 645504) < 0.1)
+  assert.ok(Math.abs((shear?.designCapacity ?? 0) - 580953.6) < 0.1)
+  assert.ok(Math.abs((shear?.utilisation ?? 0) - 400000 / 580953.6) < 1e-9)
+  assert.equal(shear?.status, "pass")
+  assert.match(shear?.note ?? "", /τcr/)
+  assert.equal(report.overall, "pass")
+  assert.match(report.headline, /PASS FOR ALL APPLICABLE IMPLEMENTED CHECKS/)
+  assert.match(report.headline, /NOT COMPLETE AS 4100/)
+  const omitted = evaluateAs4100({
+    role: "web",
+    dpMm: 800,
+    twMm: 8,
+    fyMpa: 300,
+    webGross: "gross",
+    stiffening: "unstiffened",
+    shearMode: "uniform",
+    vStarN: 400000,
+    webBound: "both-flanges",
+    d1Mm: 800,
+  })
+  assert.equal(omitted.checks.find((item) => item.id === "shear")?.status, "pass")
+  assert.equal(omitted.overall, "not-complete")
+  assert.match(omitted.headline, /NOT A COMPLETE PASS/)
+})
+
+test("stocky web uses shear yield only", () => {
+  const report = evaluateAs4100({
+    role: "web",
+    dpMm: 400,
+    twMm: 10,
+    fyMpa: 250,
+    webGross: "gross",
+    stiffening: "unstiffened",
+    shearMode: "uniform",
+    d1Mm: 400,
+    webBound: "both-flanges",
+  })
+  const shear = report.checks.find((item) => item.id === "shear")
+  assert.match(shear?.title ?? "", /yield/)
+  assert.ok(Math.abs((shear?.nominal ?? 0) - 600000) < 0.1)
+  assert.ok(Math.abs((shear?.designCapacity ?? 0) - 540000) < 0.1)
+  assert.equal(shear?.status, "not-checked")
+})
+
+test("I-section bearing yield is 1.25 bbf tw fy and is not the patch eigenvalue", () => {
+  const report = evaluateAs4100({
+    role: "web",
+    bearing: "ic",
+    bbfMm: 100,
+    bbMm: 500,
+    twMm: 10,
+    fyMpa: 300,
+    d1Mm: 200,
+    flangesRestrained: true,
+    rStarN: 200000,
+    stiffening: "unstiffened",
+  })
+  const row = report.checks.find((item) => item.id === "bearing")
+  assert.equal(row?.nominal, 375000)
+  assert.equal(row?.designCapacity, 337500)
+  assert.equal(row?.phi, 0.9)
+  assert.match(row?.steps.join(" ") ?? "", /αc = 0\.7791/)
+  assert.match(row?.note ?? "", /not Rbb/)
+  assert.equal(row?.status, "pass")
+})
+
+test("RHS bearing is outside the implemented scope", () => {
+  const report = evaluateAs4100({ role: "web", bearing: "rhs" })
+  const row = report.checks.find((item) => item.id === "bearing")
+  assert.equal(row?.status, "out-of-scope")
+  assert.match(row?.result ?? "", /OUTSIDE/)
+  assert.match(row?.note ?? "", /αp/)
+})
+
+test("intermediate stiffener second moment uses the length-to-the-fourth limit", () => {
+  const d1 = 1000
+  const tw = 10
+  const s = 2000
+  const need = 1.5 * d1 ** 3 * tw ** 3 / s ** 2
+  assert.ok(Math.abs(need - 375000) < 1e-6)
+  const below = evaluateAs4100({
+    role: "web",
+    stiffener: "intermediate",
+    arrangement: "pair",
+    d1Mm: d1,
+    twMm: tw,
+    dpMm: d1,
+    sMm: s,
+    fyMpa: 250,
+    webGross: "gross",
+    stiffening: "transverse",
+    shearMode: "uniform",
+    isMm4: need / 2,
+    asMm2: 1000,
+    tsMm: 10,
+    besMm: 80,
+    fysMpa: 250,
+  })
+  const low = below.checks.find((item) => item.id === "stiffener-stiffness")
+  assert.equal(low?.status, "fail")
+  assert.match(low?.steps.join(" ") ?? "", /1\.5 d1/)
+  const on = evaluateAs4100({
+    role: "web",
+    stiffener: "intermediate",
+    arrangement: "pair",
+    d1Mm: d1,
+    twMm: tw,
+    dpMm: d1,
+    sMm: s,
+    fyMpa: 250,
+    webGross: "gross",
+    stiffening: "transverse",
+    shearMode: "uniform",
+    isMm4: need,
+    asMm2: 1000,
+    tsMm: 10,
+    besMm: 80,
+    fysMpa: 250,
+  })
+  assert.equal(on.checks.find((item) => item.id === "stiffener-stiffness")?.status, "pass")
+})
+
+test("the two stiffener stiffness limits meet at s/d1 = √2", () => {
+  const d1 = 800
+  const tw = 8
+  const s = d1 * Math.SQRT2
+  const first = 0.75 * d1 * tw ** 3
+  const second = 1.5 * d1 * tw ** 3 / (s / d1) ** 2
+  assert.ok(Math.abs(first - second) / first < 1e-12)
+})
+
+test("kb is not taken from the eigenvalue unless the alternative width is selected", () => {
+  const base = {
+    role: "element" as const,
+    clearWidthMm: 500,
+    thicknessMm: 8,
+    fyMpa: 350,
+    residual: "HW" as const,
+    edgesSupported: "both" as const,
+    stress: "uniform-compression" as const,
+  }
+  const primary = evaluateAs4100({ ...base, kb: 8, widthPath: "primary" })
+  const plain = evaluateAs4100(base)
+  assert.equal(primary.diagram.effectiveMm, plain.diagram.effectiveMm)
+  assert.match(primary.checks.find((item) => item.id === "effective-width")?.steps.join(" ") ?? "", /not mixed/)
+  const alternative = evaluateAs4100({ ...base, widthPath: "alternative" })
+  assert.equal(alternative.checks.find((item) => item.id === "effective-width")?.status, "data-required")
+  assert.match(alternative.checks.find((item) => item.id === "effective-width")?.note ?? "", /FEM σcr is not inserted/)
+})
+
+test("thickness below 3 mm and fy above 690 MPa are outside AS 4100", () => {
+  assert.equal(evaluateAs4100({ role: "element", clearWidthMm: 100, thicknessMm: 2, fyMpa: 350, residual: "HR", edgesSupported: "both", stress: "uniform-compression" }).checks.find((item) => item.id === "slenderness")?.status, "out-of-scope")
+  assert.equal(evaluateAs4100({ role: "element", clearWidthMm: 100, thicknessMm: 10, fyMpa: 700, residual: "HR", edgesSupported: "both", stress: "uniform-compression" }).checks.find((item) => item.id === "slenderness")?.status, "out-of-scope")
+})
+
+test("a passing element check still says it is not certified, and Appendix I does not govern", () => {
+  const report = evaluateAs4100({
+    role: "element",
+    clearWidthMm: 200,
+    thicknessMm: 10,
+    fyMpa: 250,
+    residual: "HR",
+    edgesSupported: "both",
+    stress: "uniform-compression",
+    holes: "none",
+    axial: "none",
+  })
+  assert.equal(report.overall, "pass")
+  assert.match(report.headline, /PASS FOR ALL APPLICABLE IMPLEMENTED CHECKS/)
+  assert.match(report.headline, /NOT COMPLETE AS 4100/)
+  assert.equal(report.checks.find((item) => item.id === "appendix-i")?.normative, false)
+  assert.equal(report.checks.find((item) => item.id === "member-nc")?.status, "out-of-scope")
+  assert.equal(report.governingUtil, null)
+})
+
+test("the default adapter does not invent a resistance from the panel", () => {
+  const rows = designChecks("as4100", {
+    aMm: 1000, bMm: 500, tMm: 10, fyMpa: 350, edgesSimplySupported: true, stiffenerCount: 1, hasPatch: true,
+  })
+  assert.ok(rows.some((row) => row.id === "elastic-fence"))
+  assert.equal(rows.find((row) => row.id === "slenderness")?.status, "not-checked")
+  assert.ok(rows.every((row) => row.result !== "PASS" && !/^\d+(\.\d+)?\s*kN/.test(row.result)))
+  const en = designChecks("en1993", { aMm: 1, bMm: 1, tMm: 1, fyMpa: 1, edgesSimplySupported: true, stiffenerCount: 0, hasPatch: false })
+  const crane = designChecks("as5224", { aMm: 1, bMm: 1, tMm: 1, fyMpa: 1, edgesSimplySupported: true, stiffenerCount: 0, hasPatch: false })
+  assert.ok(en.every((row) => row.status !== "pass"))
+  assert.ok(crane.every((row) => row.result === "NOT A DESIGN CAPACITY" || row.result === "VERIFIED STANDARD DATA REQUIRED"))
+})
+
+test("Clause 5.12.3 reduces shear when moment exceeds 0.75 φMs", () => {
+  const ms = 1e8
+  const mStar = 8e7
+  const phi = 0.9
+  const vv = 600000
+  const vvm = vv * (2.2 - 1.6 * mStar / (phi * ms))
+  const report = evaluateAs4100({
+    role: "web",
+    dpMm: 400,
+    twMm: 10,
+    fyMpa: 250,
+    webGross: "gross",
+    stiffening: "unstiffened",
+    shearMode: "uniform",
+    interaction: "section",
+    msNmm: ms,
+    mStarNmm: mStar,
+    vStarN: 200000,
+    d1Mm: 400,
+    webBound: "both-flanges",
+  })
+  const row = report.checks.find((item) => item.id === "interaction")
+  assert.ok(Math.abs(vvm - 466666.6667) < 0.01)
+  assert.ok(Math.abs((row?.nominal ?? 0) - vvm) < 0.1)
+  assert.ok(Math.abs((row?.designCapacity ?? 0) - phi * vvm) < 0.1)
+  assert.ok(Math.abs((row?.utilisation ?? 0) - mStar / (phi * ms)) < 1e-9)
+  assert.match(row?.clause ?? "", /5\.12\.3/)
+  assert.match(row?.note ?? "", /not γM/)
+})
+
+test("running the design layer does not change IQ-PLB-E1.0", () => {
+  const input = {
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3,
+    sigma1Mpa: 100, psi: 1, tauMpa: 0, nx: 8, ny: 8, edges: SS, krNPerRadPerMm: 0, modes: 1,
+  }
+  const before = solvePlateFem(input)
+  evaluateAs4100({
+    role: "element", clearWidthMm: 300, thicknessMm: 10, fyMpa: 350, residual: "HR",
+    edgesSupported: "both", stress: "uniform-compression", kb: 6, widthPath: "alternative",
+  })
+  designChecks("as4100", {
+    ...{ aMm: 1000, bMm: 1000, tMm: 10, fyMpa: 350, edgesSimplySupported: true, stiffenerCount: 3, hasPatch: true },
+    design: { role: "web", dpMm: 1000, twMm: 10, fyMpa: 350, webGross: "gross", stiffening: "unstiffened", shearMode: "uniform", vStarN: 1 },
+  })
+  const after = solvePlateFem(input)
+  assert.equal(before.ok, true)
+  assert.equal(after.modes[0]?.lambda, before.modes[0]?.lambda)
+  assert.equal(after.modes[0]?.sigma1CrMpa, before.modes[0]?.sigma1CrMpa)
+  assert.equal(after.modes[0]?.tauCrMpa, before.modes[0]?.tauCrMpa)
+})
+
+
+========================================================================
+FILE src/plate/banded.ts
+========================================================================
+
+/** Symmetric band matrix, lower triangle including the diagonal.
+ * Entry A(i,j) for i >= j and i - j < bw is stored at i * bw + (i - j).
+ */
+
+export function bandIndex(i: number, j: number, bw: number): number {
+  return i * bw + (i - j)
+}
+
+export function bandAdd(A: Float64Array, bw: number, i: number, j: number, value: number) {
+  if (value === 0 || !Number.isFinite(value)) return
+  if (i < j) {
+    const swap = i
+    i = j
+    j = swap
+  }
+  const span = i - j
+  if (span >= bw) throw new Error(`Banded matrix span ${span} exceeds bandwidth ${bw}.`)
+  A[i * bw + span] += value
+}
+
+export function bandedCholesky(A: Float64Array, n: number, bw: number): Float64Array | null {
+  const L = new Float64Array(n * bw)
+  for (let i = 0; i < n; i++) {
+    const j0 = Math.max(0, i - bw + 1)
+    for (let j = j0; j <= i; j++) {
+      let sum = A[i * bw + (i - j)]!
+      const kStart = Math.max(j0, j - bw + 1)
+      for (let k = kStart; k < j; k++) {
+        sum -= L[i * bw + (i - k)]! * L[j * bw + (j - k)]!
+      }
+      if (i === j) {
+        if (!(sum > 0)) return null
+        L[i * bw] = Math.sqrt(sum)
+      } else {
+        const pivot = L[j * bw]!
+        if (!(pivot > 0)) return null
+        L[i * bw + (i - j)] = sum / pivot
+      }
+    }
+  }
+  return L
+}
+
+export function bandedSolve(L: Float64Array, n: number, bw: number, b: Float64Array): Float64Array {
+  const y = new Float64Array(n)
+  const x = new Float64Array(n)
+  for (let i = 0; i < n; i++) {
+    let sum = b[i]!
+    const k0 = Math.max(0, i - bw + 1)
+    for (let k = k0; k < i; k++) sum -= L[i * bw + (i - k)]! * y[k]!
+    y[i] = sum / L[i * bw]!
+  }
+  for (let i = n - 1; i >= 0; i--) {
+    let sum = y[i]!
+    const k1 = Math.min(n - 1, i + bw - 1)
+    for (let k = i + 1; k <= k1; k++) sum -= L[k * bw + (k - i)]! * x[k]!
+    x[i] = sum / L[i * bw]!
+  }
+  return x
+}
+
+export function bandedForward(L: Float64Array, n: number, bw: number, b: Float64Array): Float64Array {
+  const y = new Float64Array(n)
+  for (let i = 0; i < n; i++) {
+    let sum = b[i]!
+    const k0 = Math.max(0, i - bw + 1)
+    for (let k = k0; k < i; k++) sum -= L[i * bw + (i - k)]! * y[k]!
+    y[i] = sum / L[i * bw]!
+  }
+  return y
+}
+
+/** Solve Lᵀ x = b. L is the banded Cholesky factor. */
+export function bandedBack(L: Float64Array, n: number, bw: number, b: Float64Array): Float64Array {
+  const x = new Float64Array(n)
+  for (let i = n - 1; i >= 0; i--) {
+    let sum = b[i]!
+    const k1 = Math.min(n - 1, i + bw - 1)
+    for (let k = i + 1; k <= k1; k++) sum -= L[k * bw + (k - i)]! * x[k]!
+    x[i] = sum / L[i * bw]!
+  }
+  return x
+}
+
+export function bandedMatvec(A: Float64Array, n: number, bw: number, x: Float64Array, out: Float64Array) {
+  for (let i = 0; i < n; i++) {
+    let sum = A[i * bw]! * x[i]!
+    const k0 = Math.max(0, i - bw + 1)
+    for (let j = k0; j < i; j++) sum += A[i * bw + (i - j)]! * x[j]!
+    const k1 = Math.min(n - 1, i + bw - 1)
+    for (let j = i + 1; j <= k1; j++) sum += A[j * bw + (j - i)]! * x[j]!
+    out[i] = sum
+  }
+}

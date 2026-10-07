@@ -1,0 +1,3594 @@
+IQ-CAL-PLB WHOLE APP — PART 5 OF 6
+Plain text. Read this file directly. Do not unzip, download, or browse.
+This pack is the engineering website: plate buckling, bolts, units, and the pages that show them.
+Elastic plate engine IQ-PLB-E1.0. AS 4100 plate/web subset IQ-PLB-AS4100-D1.0.
+Not included: node_modules, package-lock, the copyrighted standard PDF, and the Grok preview-host login code.
+
+
+========================================================================
+FILE src/plate/prestress.ts
+========================================================================
+
+/** Plane-stress pre-buckling field for an edge patch load.
+ * Stage 1 of the buckling solve. Not a code resistance.
+ * Compression is positive in the stresses returned to Kg.
+ */
+
+import { bandAdd, bandedCholesky, bandedSolve } from "./banded.ts"
+
+export type PatchEdge = "x0" | "x1" | "y0" | "y1"
+
+export type PatchLoad = {
+  edge: PatchEdge
+  /** Centre of the loaded length, mm, measured along the edge. */
+  atMm: number
+  lengthMm: number
+  /** Force normal to the edge, N. Positive pushes into the plate. */
+  forceN: number
+}
+
+export type Prestress = {
+  ok: boolean
+  reason: string
+  sigX: Float64Array
+  sigY: Float64Array
+  tau: Float64Array
+  equilibrium: number
+  /** Resultant of the nodal forces actually applied, N, compression positive. */
+  appliedN: number
+  /** Global components of the applied nodal force. +x to the right, +y up. */
+  appliedFx: number
+  appliedFy: number
+  /** Support forces on the plate, from ∫ Bᵀσ on the restrained DOFs. */
+  reactionFx: number
+  reactionFy: number
+  /** Moment of applied plus reaction forces about the plate centre, N·mm. */
+  momentNmm: number
+  /** |applied + reaction| / max(|applied|, |force|). */
+  forceImbalance: number
+  note: string
+}
+
+function shape(xi: number, eta: number) {
+  const corners = [
+    { x: -1, y: -1 },
+    { x: 1, y: -1 },
+    { x: 1, y: 1 },
+    { x: -1, y: 1 },
+  ]
+  return corners.map((p) => ({
+    n: 0.25 * (1 + p.x * xi) * (1 + p.y * eta),
+    dxi: 0.25 * p.x * (1 + p.y * eta),
+    deta: 0.25 * p.y * (1 + p.x * xi),
+  }))
+}
+
+function fail(reason: string): Prestress {
+  return {
+    ok: false, reason, sigX: new Float64Array(), sigY: new Float64Array(), tau: new Float64Array(),
+    equilibrium: 0, appliedN: 0, appliedFx: 0, appliedFy: 0, reactionFx: 0, reactionFy: 0, momentNmm: 0, forceImbalance: 0, note: "",
+  }
+}
+
+export function patchInterval(patch: PatchLoad, edgeLength: number): { start: number; end: number } | string {
+  if (!(patch.lengthMm > 0)) return "Loaded length must be positive."
+  if (!Number.isFinite(patch.forceN) || patch.forceN === 0) return "Patch force is zero."
+  if (patch.lengthMm > edgeLength + 1e-6) return "Loaded length is longer than the edge."
+  const start = patch.atMm - patch.lengthMm / 2
+  const end = patch.atMm + patch.lengthMm / 2
+  if (start < -1e-6 || end > edgeLength + 1e-6) return "The patch does not lie on the edge."
+  return { start: Math.max(0, start), end: Math.min(edgeLength, end) }
+}
+
+export function solvePatchPrestress(input: {
+  xs: number[]
+  ys: number[]
+  tMm: number
+  eMpa: number
+  nu: number
+  patch: PatchLoad
+}): Prestress {
+  const { xs, ys, tMm, eMpa, nu, patch } = input
+  const nx = xs.length - 1
+  const ny = ys.length - 1
+  if (nx < 1 || ny < 1) return fail("The mesh has no elements.")
+  const a = xs[nx]! - xs[0]!
+  const b = ys[ny]! - ys[0]!
+  const edgeLength = patch.edge === "x0" || patch.edge === "x1" ? b : a
+  const interval = patchInterval(patch, edgeLength)
+  if (typeof interval === "string") return fail(interval)
+  const nodesX = nx + 1
+  const nodes = nodesX * (ny + 1)
+  const ndof = nodes * 2
+  const bw = 2 * nodesX + 8
+  const along = patch.edge === "y0" || patch.edge === "y1" ? xs : ys
+  const covers = (p: number, q: number) => {
+    const lo = Math.min(p, q)
+    const hi = Math.max(p, q)
+    return lo >= interval.start - 1e-4 && hi <= interval.end + 1e-4 && hi - lo > 1e-8
+  }
+  const free = new Int32Array(ndof).fill(-1)
+  const held = new Uint8Array(ndof)
+  const hold = (dof: number) => { held[dof] = 1 }
+  if (patch.edge === "y1" || patch.edge === "y0") {
+    const iy = patch.edge === "y1" ? 0 : ny
+    for (let ix = 0; ix < nodesX; ix++) hold((iy * nodesX + ix) * 2 + 1)
+    hold((iy * nodesX) * 2)
+  } else {
+    const ix = patch.edge === "x1" ? 0 : nx
+    for (let iy = 0; iy <= ny; iy++) hold((iy * nodesX + ix) * 2)
+    hold(1)
+  }
+  const keep: number[] = []
+  for (let dof = 0; dof < ndof; dof++) {
+    if (!held[dof]) {
+      free[dof] = keep.length
+      keep.push(dof)
+    }
+  }
+  const n = keep.length
+  if (n < 1) return fail("The in-plane restraints removed every degree of freedom.")
+  const K = new Float64Array(n * bw)
+  const fac = eMpa / (1 - nu * nu)
+  const C = [fac, fac * nu, 0, fac * nu, fac, 0, 0, 0, fac * (1 - nu) / 2]
+  const gp = [-1 / Math.sqrt(3), 1 / Math.sqrt(3)]
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const ae = xs[ix + 1]! - xs[ix]!
+      const be = ys[iy + 1]! - ys[iy]!
+      const ids = [iy * nodesX + ix, iy * nodesX + ix + 1, (iy + 1) * nodesX + ix + 1, (iy + 1) * nodesX + ix]
+      for (const xi of gp) for (const eta of gp) {
+        const sh = shape(xi, eta)
+        const detJ = (ae / 2) * (be / 2)
+        const dNdx = sh.map((p) => p.dxi * (2 / ae))
+        const dNdy = sh.map((p) => p.deta * (2 / be))
+        const B = [new Float64Array(8), new Float64Array(8), new Float64Array(8)]
+        for (let i = 0; i < 4; i++) {
+          B[0]![i * 2] = dNdx[i]!
+          B[1]![i * 2 + 1] = dNdy[i]!
+          B[2]![i * 2] = dNdy[i]!
+          B[2]![i * 2 + 1] = dNdx[i]!
+        }
+        for (let a = 0; a < 8; a++) for (let b = 0; b < 8; b++) {
+          let s = 0
+          for (let p = 0; p < 3; p++) for (let q = 0; q < 3; q++) s += B[p]![a]! * C[p * 3 + q]! * B[q]![b]!
+          const ga = ids[Math.floor(a / 2)]! * 2 + (a % 2)
+          const gb = ids[Math.floor(b / 2)]! * 2 + (b % 2)
+          const fi = free[ga]!
+          const fj = free[gb]!
+          if (fi < 0 || fj < 0 || fi < fj) continue
+          bandAdd(K, bw, fi, fj, s * detJ * tMm)
+        }
+      }
+    }
+  }
+  const load = new Float64Array(n)
+  const applied = new Float64Array(ndof)
+  let appliedFx = 0
+  let appliedFy = 0
+  const q = patch.forceN / patch.lengthMm
+  const addEdge = (n0: number, n1: number, length: number, direction: 0 | 1, sign: number) => {
+    const share = (sign * q * length) / 2
+    for (const node of [n0, n1]) {
+      const dof = node * 2 + direction
+      const f = free[dof]!
+      if (f >= 0) {
+        load[f] += share
+        applied[dof] += share
+        if (direction === 0) appliedFx += share
+        else appliedFy += share
+      }
+    }
+  }
+  if (patch.edge === "y1" || patch.edge === "y0") {
+    const iy = patch.edge === "y1" ? ny : 0
+    const sign = patch.edge === "y1" ? -1 : 1
+    for (let ix = 0; ix < nx; ix++) {
+      if (!covers(along[ix]!, along[ix + 1]!)) continue
+      addEdge(iy * nodesX + ix, iy * nodesX + ix + 1, xs[ix + 1]! - xs[ix]!, 1, sign)
+    }
+  } else {
+    const ix = patch.edge === "x1" ? nx : 0
+    const sign = patch.edge === "x1" ? -1 : 1
+    for (let iy = 0; iy < ny; iy++) {
+      if (!covers(along[iy]!, along[iy + 1]!)) continue
+      addEdge(iy * nodesX + ix, (iy + 1) * nodesX + ix, ys[iy + 1]! - ys[iy]!, 0, sign)
+    }
+  }
+  const factor = bandedCholesky(K, n, bw)
+  if (!factor) return fail("The in-plane stiffness is singular for this patch and these restraints.")
+  let appliedSigned = 0
+  for (let i = 0; i < n; i++) appliedSigned += load[i]!
+  const loadSign = patch.edge === "y1" || patch.edge === "x1" ? -1 : 1
+  const appliedN = appliedSigned / loadSign
+  const appliedError = patch.forceN !== 0 ? Math.abs(appliedN - patch.forceN) / Math.abs(patch.forceN) : 0
+  if (!(Math.abs(appliedN) > 0) || appliedError > 0.005) {
+    return fail(`The patch force was not applied to the mesh. Requested ${patch.forceN.toFixed(2)} N, nodal resultant ${appliedN.toFixed(2)} N.`)
+  }
+  const solved = bandedSolve(factor, n, bw, load)
+  const u = new Float64Array(ndof)
+  for (let i = 0; i < n; i++) u[keep[i]!] = solved[i]!
+  const count = nx * ny
+  const sigX = new Float64Array(count)
+  const sigY = new Float64Array(count)
+  const tau = new Float64Array(count)
+  let equilibrium = 0
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const ae = xs[ix + 1]! - xs[ix]!
+      const be = ys[iy + 1]! - ys[iy]!
+      const ids = [iy * nodesX + ix, iy * nodesX + ix + 1, (iy + 1) * nodesX + ix + 1, (iy + 1) * nodesX + ix]
+      const sh = shape(0, 0)
+      const dNdx = sh.map((p) => p.dxi * (2 / ae))
+      const dNdy = sh.map((p) => p.deta * (2 / be))
+      let ex = 0
+      let ey = 0
+      let gxy = 0
+      for (let i = 0; i < 4; i++) {
+        const uu = u[ids[i]! * 2]!
+        const vv = u[ids[i]! * 2 + 1]!
+        ex += dNdx[i]! * uu
+        ey += dNdy[i]! * vv
+        gxy += dNdy[i]! * uu + dNdx[i]! * vv
+      }
+      const sx = fac * (ex + nu * ey)
+      const sy = fac * (nu * ex + ey)
+      const txy = fac * (1 - nu) / 2 * gxy
+      const slot = iy * nx + ix
+      sigX[slot] = -sx
+      sigY[slot] = -sy
+      tau[slot] = txy
+      if (iy === Math.floor(ny / 2)) equilibrium += sigY[slot]! * tMm * ae
+    }
+  }
+  const normal = patch.edge === "x0" || patch.edge === "x1"
+  let flow = 0
+  if (normal) {
+    const ix = Math.floor(nx / 2)
+    for (let iy = 0; iy < ny; iy++) flow += sigX[iy * nx + ix]! * tMm * (ys[iy + 1]! - ys[iy]!)
+  } else flow = equilibrium
+  const imbalance = patch.forceN !== 0 ? Math.abs(flow - patch.forceN) / Math.abs(patch.forceN) : 0
+  const fInt = new Float64Array(ndof)
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const ae = xs[ix + 1]! - xs[ix]!
+      const be = ys[iy + 1]! - ys[iy]!
+      const ids = [iy * nodesX + ix, iy * nodesX + ix + 1, (iy + 1) * nodesX + ix + 1, (iy + 1) * nodesX + ix]
+      for (const xi of gp) for (const eta of gp) {
+        const sh = shape(xi, eta)
+        const detJ = (ae / 2) * (be / 2)
+        const dNdx = sh.map((p) => p.dxi * (2 / ae))
+        const dNdy = sh.map((p) => p.deta * (2 / be))
+        let ex = 0
+        let ey = 0
+        let gxy = 0
+        for (let i = 0; i < 4; i++) {
+          ex += dNdx[i]! * u[ids[i]! * 2]!
+          ey += dNdy[i]! * u[ids[i]! * 2 + 1]!
+          gxy += dNdy[i]! * u[ids[i]! * 2]! + dNdx[i]! * u[ids[i]! * 2 + 1]!
+        }
+        const sx = fac * (ex + nu * ey)
+        const sy = fac * (nu * ex + ey)
+        const txy = fac * (1 - nu) / 2 * gxy
+        const B0 = [dNdx[0]!, 0, dNdx[1]!, 0, dNdx[2]!, 0, dNdx[3]!, 0]
+        const B1 = [0, dNdy[0]!, 0, dNdy[1]!, 0, dNdy[2]!, 0, dNdy[3]!]
+        const B2 = [dNdy[0]!, dNdx[0]!, dNdy[1]!, dNdx[1]!, dNdy[2]!, dNdx[2]!, dNdy[3]!, dNdx[3]!]
+        const weight = detJ * tMm
+        for (let a = 0; a < 8; a++) {
+          const dof = ids[Math.floor(a / 2)]! * 2 + (a % 2)
+          fInt[dof] += (B0[a]! * sx + B1[a]! * sy + B2[a]! * txy) * weight
+        }
+      }
+    }
+  }
+  let reactionFx = 0
+  let reactionFy = 0
+  let moment = 0
+  for (let iy = 0; iy <= ny; iy++) {
+    for (let ix = 0; ix < nodesX; ix++) {
+      const node = iy * nodesX + ix
+      const dx = node * 2
+      const dy = dx + 1
+      const fx = held[dx] ? fInt[dx]! : applied[dx]!
+      const fy = held[dy] ? fInt[dy]! : applied[dy]!
+      if (held[dx]) reactionFx += fInt[dx]!
+      if (held[dy]) reactionFy += fInt[dy]!
+      moment += (xs[ix]! - a / 2) * fy - (ys[iy]! - b / 2) * fx
+    }
+  }
+  const forceScale = Math.max(Math.abs(appliedFx), Math.abs(appliedFy), Math.abs(patch.forceN), 1)
+  const forceImbalance = Math.hypot(appliedFx + reactionFx, appliedFy + reactionFy) / forceScale
+  if (forceImbalance > 0.005) {
+    return fail(`Pre-buckling equilibrium failed. ΣFx = ${(appliedFx + reactionFx).toFixed(2)} N, ΣFy = ${(appliedFy + reactionFy).toFixed(2)} N, ΣMz = ${moment.toExponential(3)} N·mm. The eigenvalue is not trusted.`)
+  }
+  const note = [
+    "TWO-STAGE BUCKLING. Stage 1 is a linear plane-stress solve for the patch.",
+    "The patch is a uniform normal traction over the loaded length, not a point force and not a rectangular stress block.",
+    "Positive force pushes into the plate. The opposite edge is restrained in the normal direction. One extra restraint stops in-plane rigid motion. Side edges are free in-plane.",
+    "Stage 2 builds Kg from the recovered element stresses, added to any σx, σy and τxy you entered. λ multiplies that whole field.",
+    "Out-of-plane eccentricity is not in this model.",
+    `Requested patch force ${patch.forceN.toFixed(2)} N. Applied nodal force ${appliedN.toFixed(2)} N. Difference ${(appliedError * 100).toFixed(4)}%.`,
+    `Equilibrium check: the integrated compressive force on a mid-span cut is ${flow.toFixed(2)} N against the applied ${patch.forceN.toFixed(2)} N.`,
+    `Applied Fx ${appliedFx.toFixed(2)} N. Applied Fy ${appliedFy.toFixed(2)} N. Reaction Fx ${reactionFx.toFixed(2)} N. Reaction Fy ${reactionFy.toFixed(2)} N. Force imbalance ${(forceImbalance * 100).toFixed(4)}%. Moment about the plate centre ${moment.toExponential(3)} N·mm.`,
+    `ΣFx ${(appliedFx + reactionFx).toExponential(3)} N. ΣFy ${(appliedFy + reactionFy).toExponential(3)} N. ΣMz ${moment.toExponential(3)} N·mm.`,
+  ].join(" ")
+  return {
+    ok: true, reason: "", sigX, sigY, tau, equilibrium: imbalance, appliedN, note,
+    appliedFx, appliedFy, reactionFx, reactionFy, momentNmm: moment, forceImbalance,
+  }
+}
+
+
+========================================================================
+FILE src/plate/standards/as4100/assignment.ts
+========================================================================
+
+/** Explicit mapping from the elastic panel into AS 4100 symbols. Nothing is copied unless a link exists. */
+
+export type PanelGeometry = {
+  aMm: number | null
+  bMm: number | null
+  tMm: number | null
+  fyMpa: number | null
+  fuMpa: number | null
+}
+
+export type AssignmentSource = keyof PanelGeometry
+
+export type AssignmentField = "clearWidthMm" | "thicknessMm" | "fyMpa" | "fuMpa" | "dpMm" | "twMm" | "d1Mm"
+
+export type AssignmentLink = {
+  field: AssignmentField
+  source: AssignmentSource
+  captured: number
+}
+
+export function staleAssignments(links: readonly AssignmentLink[], panel: PanelGeometry): AssignmentLink[] {
+  return links.filter((link) => {
+    const now = panel[link.source]
+    return now == null || !Number.isFinite(now) || Math.abs(now - link.captured) > 1e-6
+  })
+}
+
+export function withoutStale<T extends object>(design: T, stale: readonly AssignmentLink[]): T {
+  const next = { ...design }
+  for (const link of stale) delete (next as Record<string, unknown>)[link.field]
+  return next
+}
+
+
+========================================================================
+FILE src/plate/standards/as4100/evaluate.ts
+========================================================================
+
+import { columnCapacity } from "./member.ts"
+import { alphaD, alphaFFlange, alphaVStiffened, alphaVUnstiffened, shearYield, stockyLimit } from "./shear.ts"
+import {
+  AS4100_META, blankCheck, blocks, designDefaults, fmt, kn, phiOf, pos, utilisation,
+  type Check, type DesignInput,
+} from "./shared.ts"
+import { kbo, lambdaE, lambdaEy624, limits52, residualLabel } from "./tables.ts"
+
+export type Diagram = {
+  edges: "one" | "both" | null
+  stress: string
+  clearMm: number | null
+  effectiveMm: number | null
+  thicknessMm: number | null
+}
+
+export type Report = {
+  meta: typeof AS4100_META
+  checks: Check[]
+  diagram: Diagram
+  limitations: string[]
+  governing: string
+  governingUtil: number | null
+  overall: "pass" | "not-complete"
+  headline: string
+}
+
+function outsideMaterial(fy: number | null, thickness: number | null): string | null {
+  if (thickness != null && thickness > 0 && thickness < 3) {
+    return "Clause 1.1.2(a): AS 4100 does not apply to a steel element less than 3 mm thick, other than the cold-formed hollow-section exception, which this plate is not."
+  }
+  if (fy != null && fy > 690) {
+    return "Clause 1.1.2(b): the yield stress used in design exceeds 690 MPa."
+  }
+  return null
+}
+
+function scopeRow(id: string, group: string, title: string, clause: string, note: string): Check {
+  return blankCheck({
+    id, group, title, clause, equation: "Clause 1.1.2",
+    status: "out-of-scope", result: "OUTSIDE IMPLEMENTED SCOPE", note,
+  })
+}
+
+const SIZE_KEYS = [
+  "clearWidthMm", "thicknessMm", "fyMpa", "fuMpa", "kb", "anMm2", "kt",
+  "dpMm", "twMm", "d1Mm", "sMm", "bfoMm", "tfMm",
+  "afgMm2", "afnMm2", "afeMm2", "dfMm", "flangeFyMpa", "flangeFuMpa",
+  "bbfMm", "bbMm", "bsMm", "bearingTfMm", "asMm2", "fysMpa", "tsMm", "besMm", "isMm4",
+  "torsionDepthMm", "torsionTfMm", "fMemberN", "d2Mm", "asLongMm2", "isLongMm4",
+  "lwMm", "modulusMpa", "endGapMm", "aepMm2", "nwN", "rwN", "vwN", "fnN", "fpN",
+] as const
+
+const SIGNED_KEYS = ["nStarN", "mStarNmm", "mwNmm", "mpNmm", "eccMm"] as const
+
+function invalidInput(input: DesignInput): string | null {
+  for (const key of SIZE_KEYS) {
+    const value = input[key]
+    if (value == null) continue
+    if (!Number.isFinite(value)) return `${key} is not a finite number.`
+    if (value < 0) return `${key} is negative.`
+    if (value === 0 && (key.endsWith("Mm") || key.endsWith("Mpa") || key === "kt" || key === "kb")) {
+      return `${key} is zero.`
+    }
+  }
+  for (const key of SIGNED_KEYS) {
+    const value = input[key]
+    if (value == null) continue
+    if (!Number.isFinite(value)) return `${key} is not a finite number.`
+  }
+  if (input.vStarN != null && !Number.isFinite(input.vStarN)) return "vStarN is not a finite number."
+  if (input.vStarN != null && input.vStarN < 0) return "vStarN is negative. Shear is not entered as a signed tension."
+  if (input.rStarN != null && !Number.isFinite(input.rStarN)) return "rStarN is not a finite number."
+  if (input.rStarN != null && input.rStarN < 0) return "rStarN is negative."
+  if (input.weldKnPerMm != null && (!Number.isFinite(input.weldKnPerMm) || input.weldKnPerMm < 0)) {
+    return "weldKnPerMm is not a finite non-negative weld capacity."
+  }
+  return null
+}
+
+function data(partial: Omit<Parameters<typeof blankCheck>[0], "status" | "result" | "note"> & { missing: string; note?: string }): Check {
+  const { missing, note, ...rest } = partial
+  return blankCheck({
+    ...rest,
+    status: "data-required",
+    result: "VERIFIED STANDARD DATA REQUIRED",
+    note: note || missing,
+    steps: [...(rest.steps ?? []), missing],
+  })
+}
+
+function slenderness(input: DesignInput): { checks: Check[]; be: number | null; lambda: number | null } {
+  const checks: Check[] = []
+  const want = input.role === "element" || (input.role === "web" && (input.stress != null || input.axial === "compression"))
+  if (input.role == null) {
+    checks.push(blankCheck({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "5.2.2 / 6.2.3", equation: "λe = (b/t) √(fy/250)",
+      result: "NOT CHECKED", status: "not-checked", kind: "classification",
+      note: "Plate role is not selected, so b is not taken from the panel model.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  if (!want) {
+    checks.push(blankCheck({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "5.2.2", equation: "λe = (b/t) √(fy/250)",
+      result: "NOT APPLICABLE", status: "not-applicable", kind: "classification",
+      note: "No compression stress condition and no axial compression. Clause 5.11 shear does not use λe.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  if (!pos(input.clearWidthMm) || !pos(input.thicknessMm) || !pos(input.fyMpa) || !input.edgesSupported || !input.stress) {
+    checks.push(data({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "5.2.2 / 6.2.3", equation: "λe = (b/t) √(fy/250)",
+      missing: "Required: clear width b (not the panel a or b until you assign it), thickness t, fy, longitudinal edges supported (one or both), and the stress condition.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  if (input.thicknessMm < 3) {
+    checks.push(blankCheck({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "1.1.2(a)", equation: "λe = (b/t) √(fy/250)",
+      result: "OUTSIDE IMPLEMENTED SCOPE", status: "out-of-scope",
+      note: "AS 4100 does not apply to steel elements less than 3 mm thick, other than the cold-formed hollow-section exception, which this plate is not.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  if (input.fyMpa > 690) {
+    checks.push(blankCheck({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "1.1.2(b)", equation: "λe = (b/t) √(fy/250)",
+      result: "OUTSIDE IMPLEMENTED SCOPE", status: "out-of-scope",
+      note: "The yield stress used in design exceeds 690 MPa, which Clause 1.1.2(b) excludes.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  const needsResidual = !(input.edgesSupported === "both" && input.stress === "edge-gradient")
+  if (needsResidual && !input.residual) {
+    checks.push(data({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "5.2.2", equation: "λe = (b/t) √(fy/250)",
+      missing: "Residual-stress category is required (SR, HR, LW, CF or HW). It is not assumed. Table 5.2 note: welded members with compressive residual stress below 40 MPa may be entered as lightly welded.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  if (input.edgesSupported === "one" && input.stress === "edge-gradient") {
+    checks.push(blankCheck({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "Table 5.2", equation: "λe = (b/t) √(fy/250)",
+      result: "NOT APPLICABLE", status: "not-applicable", kind: "classification",
+      note: "Table 5.2 has no row for one supported edge with compression at one edge and tension at the other. Use the outstand gradient row only when the maximum compression is at the unsupported edge.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  const limits = limits52(input.edgesSupported, input.stress, input.residual)
+  if (!limits) {
+    checks.push(data({
+      id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness",
+      clause: "Table 5.2", equation: "λe = (b/t) √(fy/250)",
+      missing: "No Table 5.2 row matches this edge support and stress condition.",
+    }))
+    return { checks, be: null, lambda: null }
+  }
+  const b = input.clearWidthMm
+  const t = input.thicknessMm
+  const fy = input.fyMpa
+  const le = lambdaE(b, t, fy)
+  const cls = le <= limits.ep ? "COMPACT" : le <= limits.ey ? "NON-COMPACT" : "SLENDER"
+  const bWords = input.edgesSupported === "one"
+    ? "clear width of the outstand from the face of the supporting plate"
+    : "clear width between the faces of the supporting plates"
+  checks.push(blankCheck({
+    id: "slenderness", group: "PLATE SLENDERNESS", title: "Element slenderness and classification",
+    clause: "5.2.2", equation: "λe = (b/t) √(fy/250); compare λe with λep and λey",
+    kind: "classification",
+    status: "pass",
+    result: `${cls}; λe = ${fmt(le, 3)}`,
+    steps: [
+      `Selected element: flat plate, ${input.edgesSupported === "one" ? "one longitudinal edge supported" : "both longitudinal edges supported"}.`,
+      `Stress condition: ${input.stress === "uniform-compression" ? "uniform compression" : input.stress === "edge-gradient" ? "compression at one edge and tension at the other" : input.stress === "outstand-gradient" ? "maximum compression at the unsupported edge" : input.stress}.`,
+      `Residual stresses: ${input.residual ? residualLabel(input.residual) : "Any — Table 5.2 does not subdivide this row"}.`,
+      `b = ${fmt(b, 3)} mm (${bWords}). Panel length and width are not used unless you assigned one of them to b.`,
+      `t = ${fmt(t, 3)} mm, fy = ${fmt(fy, 3)} MPa.`,
+      `λe = (${fmt(b, 3)} / ${fmt(t, 3)}) × √(${fmt(fy, 3)} / 250) = ${fmt(le, 4)}.`,
+      `Table 5.2 row: ${limits.row}.`,
+      `λep = ${limits.ep}, λey = ${limits.ey}${limits.ed == null ? ", λed is not given" : `, λed = ${limits.ed}`}.`,
+      `λs is this element's λe. λsp = λep and λsy = λey for that same element (Clause 5.2.2).`,
+      le <= limits.ep
+        ? `λe ≤ λep, so the element is compact.`
+        : le <= limits.ey
+          ? `λep < λe ≤ λey, so the element is non-compact.`
+          : `λe > λey, so the element is slender.`,
+    ],
+    note: "Classification is not a design resistance. Elastic σcr is not used.",
+  }))
+  if (limits.ed == null) {
+    checks.push(blankCheck({
+      id: "deformation", group: "PLATE SLENDERNESS", title: "Deformation slenderness",
+      clause: "5.2.5", equation: "λe compared with λed",
+      kind: "service", status: "not-applicable", result: "NOT APPLICABLE",
+      note: "Table 5.2 does not give λed for this row.",
+    }))
+  } else if (le > limits.ed) {
+    checks.push(blankCheck({
+      id: "deformation", group: "PLATE SLENDERNESS", title: "Deformation slenderness",
+      clause: "5.2.5", equation: "λe ≤ λed",
+      kind: "service", status: "fail", result: `λe ${fmt(le, 3)} > λed ${limits.ed}`,
+      steps: [`λed = ${limits.ed} from Table 5.2. Clause 5.2.5 says noticeable service deformations may occur. This is not a reduction of φRu.`],
+      note: "Serviceability warning. It does not change the strength capacity.",
+    }))
+  } else {
+    checks.push(blankCheck({
+      id: "deformation", group: "PLATE SLENDERNESS", title: "Deformation slenderness",
+      clause: "5.2.5", equation: "λe ≤ λed",
+      kind: "service", status: "pass", result: `λe ${fmt(le, 3)} ≤ λed ${limits.ed}`,
+      note: "Within the Table 5.2 deformation limit.",
+    }))
+  }
+
+  let be: number | null = null
+  if (input.stress !== "uniform-compression") {
+    checks.push(blankCheck({
+      id: "effective-width", group: "EFFECTIVE WIDTH", title: "Effective width",
+      clause: "6.2.4", equation: "be = b (λey/λe) ≤ b",
+      status: "not-applicable", result: "NOT APPLICABLE", kind: "classification",
+      note: "Clause 6.2.4 and Table 6.2.4 are for a flat compression element. A bending stress gradient is classified with Table 5.2 and is not given this effective width. Clause 5.2.5 does not state a Ze formula for both edges supported with compression at one edge and tension at the other when the element is slender, so Ze is not invented.",
+    }))
+    return { checks, be, lambda: le }
+  }
+  if (!input.residual) return { checks, be, lambda: le }
+  const ey = lambdaEy624(input.edgesSupported, input.residual)
+  if (ey == null) {
+    checks.push(data({
+      id: "effective-width", group: "EFFECTIVE WIDTH", title: "Effective width",
+      clause: "Table 6.2.4", equation: "be = b (λey/λe) ≤ b",
+      missing: "Table 6.2.4 has no yield limit for this edge and residual-stress pair.",
+    }))
+    return { checks, be, lambda: le }
+  }
+  const bePrimary = Math.min(b, b * (ey / le))
+  const steps = [
+    `Table 6.2.4 λey = ${ey} for ${input.edgesSupported === "one" ? "one edge (outstand)" : "both edges"}, ${residualLabel(input.residual)}.`,
+    `Primary width, Clause 6.2.4: b (λey/λe) = ${fmt(b, 3)} × (${ey} / ${fmt(le, 4)}) = ${fmt(b * ey / le, 3)} mm. ${b * ey / le > b + 1e-6 ? `That exceeds gross width b, so be is limited to b. ` : ""}be = ${fmt(bePrimary, 3)} mm.`,
+    `Gross width ${fmt(b, 3)} mm. Ineffective width ${fmt(Math.max(0, b - bePrimary), 3)} mm. This is not an iteration: one flat element in uniform compression has no neutral-axis shift.`,
+  ]
+  let beUsed = bePrimary
+  let equation = "be = b (λey/λe) ≤ b"
+  if (input.widthPath === "alternative") {
+    if (!pos(input.kb)) {
+      checks.push(data({
+        id: "effective-width", group: "EFFECTIVE WIDTH", title: "Effective width",
+        clause: "6.2.4", equation: "be = b (λey/λe) √(kb/kbo) ≤ b",
+        missing: "The alternative width needs kb from a rational elastic buckling analysis of the plate assemblage. FEM σcr is not inserted automatically.",
+        steps,
+      }))
+      return { checks, be: null, lambda: le }
+    }
+    const k0 = kbo(input.edgesSupported)
+    beUsed = Math.min(b, b * (ey / le) * Math.sqrt(input.kb / k0))
+    equation = "be = b (λey/λe) √(kb/kbo) ≤ b"
+    steps.push(`Alternative, Clause 6.2.4: kbo = ${k0} (${input.edgesSupported === "both" ? "both edges" : "outstand"}). kb = ${fmt(input.kb, 4)} supplied by you, not taken from λFEM.`)
+    steps.push(`be = ${fmt(b, 3)} × (${ey}/${fmt(le, 4)}) × √(${fmt(input.kb, 4)}/${k0}) = ${fmt(beUsed, 3)} mm.`)
+  } else if (pos(input.kb)) {
+    steps.push(`kb = ${fmt(input.kb, 4)} is entered but the primary width is selected. It is not mixed into φNs.`)
+  }
+  be = beUsed
+  checks.push(blankCheck({
+    id: "effective-width", group: "EFFECTIVE WIDTH", title: "Effective width",
+    clause: "6.2.4", equation, kind: "classification", status: "pass",
+    result: `be = ${fmt(beUsed, 3)} mm`,
+    steps, note: "be is a compression-element width. It is not φN.",
+  }))
+  return { checks, be, lambda: le }
+}
+
+function axial(input: DesignInput, be: number | null): Check[] {
+  if (input.axial == null) {
+    return [blankCheck({
+      id: "axial", group: "AXIAL", title: "Axial section capacity",
+      clause: "6.2.1 / 7.2", equation: "Ns = kf An fy or Nt = min(Ag fy, 0.85 kt An fu)",
+      status: "not-checked", result: "NOT CHECKED",
+      note: "Axial action is not stated. Choose none, compression or tension. A tensile force is not checked as compression.",
+    })]
+  }
+  if (input.axial === "none") {
+    return [blankCheck({
+      id: "axial", group: "AXIAL", title: "Axial section capacity",
+      clause: "6.1 / 7.1", equation: "N* ≤ φN",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "No axial design force.",
+    })]
+  }
+  const axialScope = outsideMaterial(input.fyMpa, input.thicknessMm)
+  if (axialScope) {
+    return [scopeRow("axial", "AXIAL", "Axial section capacity", input.axial === "tension" ? "7.2" : "6.2", axialScope)]
+  }
+  if (!pos(input.clearWidthMm) || !pos(input.thicknessMm) || !pos(input.fyMpa)) {
+    return [data({
+      id: "axial", group: "AXIAL", title: "Axial section capacity",
+      clause: input.axial === "tension" ? "7.2" : "6.2.1",
+      equation: input.axial === "tension" ? "Nt = min(Ag fy, 0.85 kt An fu)" : "Ns = kf An fy",
+      missing: "Clear width, thickness and fy are required before an axial section capacity can be formed.",
+    })]
+  }
+  const ag = input.clearWidthMm * input.thicknessMm
+  if (input.holes == null) {
+    return [data({
+      id: "axial", group: "AXIAL", title: "Axial section capacity",
+      clause: "6.2.1", equation: "An",
+      missing: "State that there are no holes, or enter the net area. Gross area is not assumed.",
+    })]
+  }
+  let an = ag
+  const holeSteps: string[] = [`Ag = b × t = ${fmt(input.clearWidthMm, 3)} × ${fmt(input.thicknessMm, 3)} = ${fmt(ag, 3)} mm².`]
+  if (input.holes === "net") {
+    if (!pos(input.anMm2) || !pos(input.fuMpa)) {
+      return [data({
+        id: "axial", group: "AXIAL", title: "Axial section capacity",
+        clause: "6.2.1", equation: "An",
+        missing: "Net area and fu are required. Clause 6.2.1 allows Ag only when the hole reduction is less than 100[1 − fy/(0.85 fu)] percent.",
+      })]
+    }
+    if (input.anMm2 > ag) {
+      return [blankCheck({
+        id: "axial", group: "AXIAL", title: "Axial section capacity",
+        clause: "6.2.1", equation: "An ≤ Ag",
+        status: "invalid", result: "INVALID INPUT",
+        note: `Net area ${fmt(input.anMm2, 3)} mm² is greater than gross area ${fmt(ag, 3)} mm². That is not clamped to Ag.`,
+        steps: holeSteps,
+      })]
+    }
+    const limit = 100 * (1 - input.fyMpa / (0.85 * input.fuMpa))
+    const reduction = 100 * (ag - input.anMm2) / ag
+    an = reduction < limit ? ag : input.anMm2
+    holeSteps.push(`Hole reduction = ${fmt(reduction, 3)} %. Clause 6.2.1 threshold = ${fmt(limit, 3)} %. An used = ${fmt(an, 3)} mm².`)
+  } else {
+    holeSteps.push("No holes entered, so An = Ag.")
+  }
+  if (input.axial === "tension") {
+    if (!pos(input.fuMpa) || !pos(input.kt)) {
+      return [data({
+        id: "axial", group: "AXIAL", title: "Tension section capacity",
+        clause: "7.2", equation: "Nt = min(Ag fy, 0.85 kt An fu)",
+        missing: "fu and kt are required. kt = 1.0 only where Clause 7.3.1 end connections are satisfied. It is not assumed.",
+        steps: holeSteps,
+      })]
+    }
+    const nYield = ag * input.fyMpa
+    const fracture = 0.85 * input.kt * an * input.fuMpa
+    const nt = Math.min(nYield, fracture)
+    const { phi, source } = phiOf("tension")
+    const design = phi * nt
+    const hasAction = input.nStarN != null && input.nStarN < 0
+    const action = hasAction ? -input.nStarN! : null
+    const used = action == null ? null : utilisation(action, design)
+    return [blankCheck({
+      id: "axial", group: "AXIAL", title: "Tension section capacity",
+      clause: "7.1 and 7.2", equation: "Nt = min(Ag fy, 0.85 kt An fu); N* ≤ φ Nt",
+      status: used?.status ?? "not-checked",
+      result: action == null ? `φNt = ${kn(design)}; action not entered` : `${fmt(used!.ratio, 3)}`,
+      nominal: nt, nominalUnit: "N", phi, phiSource: source, designCapacity: design,
+      action, utilisation: used?.ratio ?? null,
+      steps: [
+        ...holeSteps,
+        `Ag fy = ${kn(nYield)}. 0.85 kt An fu = 0.85 × ${fmt(input.kt, 3)} × ${fmt(an, 3)} × ${fmt(input.fuMpa, 3)} = ${kn(fracture)}.`,
+        `Nt = ${kn(nt)}. φ = 0.90. φNt = ${kn(design)}.`,
+        "Compression slenderness is not used as a tensile resistance.",
+      ],
+      note: action == null ? "Enter the tensile design force as a negative N* (compression positive)." : "Pure tension is not reported as a buckling capacity.",
+    })]
+  }
+  if (be == null) {
+    return [data({
+      id: "axial", group: "AXIAL", title: "Compression section capacity",
+      clause: "6.2.2", equation: "kf = Ae/Ag; Ns = kf An fy",
+      missing: "Effective width is not available, so Ae cannot be formed. Uniform compression and Table 6.2.4 are required. Member capacity Nc (Clause 6.3) is outside a plate panel: le, r and αb are not panel properties.",
+      steps: holeSteps,
+    })]
+  }
+  const ae = be * input.thicknessMm
+  const kf = ae / ag
+  if (!(kf > 0) || kf > 1 + 1e-9) {
+    return [blankCheck({
+      id: "axial", group: "AXIAL", title: "Compression section capacity",
+      clause: "6.2.2", equation: "kf = Ae/Ag",
+      status: "invalid", result: "INVALID INPUT",
+      note: `kf = Ae/Ag = ${fmt(kf, 4)} is outside (0, 1]. It is not clamped.`,
+      steps: holeSteps,
+    })]
+  }
+  const ns = kf * an * input.fyMpa
+  const { phi, source } = phiOf("compression")
+  const design = phi * ns
+  const action = input.nStarN != null && input.nStarN > 0 ? input.nStarN : null
+  const used = action == null ? null : utilisation(action, design)
+  return [blankCheck({
+    id: "axial", group: "AXIAL", title: "Compression section capacity",
+    clause: "6.2.1 and 6.2.2", equation: "kf = Ae/Ag; Ns = kf An fy; N* ≤ φ Ns",
+    status: used?.status ?? "not-checked",
+    result: action == null ? `φNs = ${kn(design)}; N* not entered` : `${fmt(used!.ratio, 3)}`,
+    nominal: ns, nominalUnit: "N", phi, phiSource: source, designCapacity: design,
+    action, utilisation: used?.ratio ?? null,
+    steps: [
+      ...holeSteps,
+      `Ae = be × t = ${fmt(be, 3)} × ${fmt(input.thicknessMm, 3)} = ${fmt(ae, 3)} mm².`,
+      `kf = Ae/Ag = ${fmt(kf, 4)}.`,
+      `Ns = kf An fy = ${fmt(kf, 4)} × ${fmt(an, 3)} × ${fmt(input.fyMpa, 3)} = ${kn(ns)}.`,
+      `φ = 0.90. Design section capacity φNs = ${kn(design)}.`,
+      "Clause 6.3 member capacity Nc = αc Ns is not evaluated for the panel. It is used only inside bearing and stiffener checks where the clause fixes αb, kf and the slenderness.",
+    ],
+    note: "Nominal Ns and design φNs are kept separate. Elastic λ is not N*.",
+  })]
+}
+
+function webThickness(input: DesignInput): Check {
+  if (input.role !== "web") {
+    return blankCheck({
+      id: "web-thickness", group: "WEB", title: "Minimum web thickness",
+      clause: "5.10", equation: "tw limits of Clause 5.10",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "The plate is not identified as a web.",
+    })
+  }
+  const webScope = outsideMaterial(input.fyMpa, input.twMm)
+  if (webScope) return scopeRow("web-thickness", "WEB", "Minimum web thickness", "1.1.2", webScope)
+  if (!pos(input.d1Mm) || !pos(input.twMm) || !pos(input.fyMpa) || !input.webBound && input.stiffening !== "transverse" && input.stiffening !== "longitudinal") {
+    return data({
+      id: "web-thickness", group: "WEB", title: "Minimum web thickness",
+      clause: "5.10.1", equation: "tw ≥ (d1/180) √(fy/250) or the stiffened alternative",
+      missing: "Required for a web: clear depth d1, web thickness tw, fy, and whether both longitudinal edges are flanges or one edge is free.",
+    })
+  }
+  const root = Math.sqrt(input.fyMpa / 250)
+  const d1 = input.d1Mm
+  const tw = input.twMm
+  if (input.plasticWeb) {
+    const min = (d1 / 82) * root
+    const ok = tw + 1e-9 >= min
+    return blankCheck({
+      id: "web-thickness", group: "WEB", title: "Plastic web thickness",
+      clause: "5.10.6", equation: "tw ≥ (d1/82) √(fy/250)",
+      status: ok ? "pass" : "fail", result: `tw ${fmt(tw, 3)} mm vs ${fmt(min, 3)} mm`,
+      steps: [`Minimum = (${fmt(d1, 3)} / 82) × √(${fmt(input.fyMpa, 3)}/250) = ${fmt(min, 3)} mm.`],
+      note: "Used only because plastic design of the member was selected.",
+    })
+  }
+  if (input.stiffening === "unstiffened" || input.stiffening == null) {
+    if (!input.webBound) {
+      return data({
+        id: "web-thickness", group: "WEB", title: "Minimum web thickness",
+        clause: "5.10.1", equation: "d1/180 or d1/90",
+        missing: "Say whether the unstiffened web is bounded by flanges on both longitudinal sides or by a free edge on one side.",
+      })
+    }
+    const denom = input.webBound === "both-flanges" ? 180 : 90
+    const min = (d1 / denom) * root
+    return blankCheck({
+      id: "web-thickness", group: "WEB", title: "Unstiffened web thickness",
+      clause: "5.10.1", equation: `tw ≥ (d1/${denom}) √(fy/250)`,
+      status: tw + 1e-9 >= min ? "pass" : "fail",
+      result: `tw ${fmt(tw, 3)} mm vs ${fmt(min, 3)} mm`,
+      steps: [`d1 = ${fmt(d1, 3)} mm, ignoring fillets. Minimum = ${fmt(min, 3)} mm.`],
+      note: input.stiffening == null ? "Stiffening was not selected, so the unstiffened limit is shown and the shear check stays incomplete." : "Clause 5.10.1.",
+    })
+  }
+  if (!pos(input.sMm)) {
+    return data({
+      id: "web-thickness", group: "WEB", title: "Stiffened web thickness",
+      clause: "5.10.4", equation: "tw limit from s/d1",
+      missing: "Transverse stiffener spacing s is required. It is not taken from the FEM stiffener lines.",
+    })
+  }
+  const ratio = input.sMm / d1
+  if (input.stiffening === "transverse") {
+    if (!pos(input.dpMm)) {
+      return data({
+        id: "web-thickness", group: "WEB", title: "Stiffened web thickness",
+        clause: "5.10.4", equation: "unstiffened when s/dp > 3",
+        missing: "Clause 5.10.4 treats the web as unstiffened when s/dp > 3. Enter panel depth dp. d1 is not substituted for dp.",
+      })
+    }
+    const sOverDp = input.sMm / input.dpMm
+    if (sOverDp > 3) {
+      if (!input.webBound) {
+        return data({
+          id: "web-thickness", group: "WEB", title: "Web treated as unstiffened",
+          clause: "5.10.4", equation: "s/dp > 3 uses Clause 5.10.1",
+          missing: "s/dp exceeds 3, so the unstiffened thickness of Clause 5.10.1 applies. Say whether both edges are flanges or one edge is free.",
+        })
+      }
+      const min = input.webBound === "one-free" ? (d1 / 90) * root : (d1 / 180) * root
+      const ok = tw + 1e-9 >= min
+      return blankCheck({
+        id: "web-thickness", group: "WEB", title: "Web treated as unstiffened",
+        clause: "5.10.4", equation: "s/dp > 3 is unstiffened; thickness from 5.10.1",
+        status: ok ? "pass" : "fail",
+        result: `tw ${fmt(tw, 3)} mm vs ${fmt(min, 3)} mm`,
+        steps: [`s/dp = ${fmt(sOverDp, 4)} > 3. Minimum from Clause 5.10.1 is ${fmt(min, 3)} mm. The trigger uses dp, not d1.`],
+        note: "Clause 5.10.4. d1 remains the depth in the thickness expression.",
+      })
+    }
+    if (ratio > 3) {
+      return blankCheck({
+        id: "web-thickness", group: "WEB", title: "Transversely stiffened web thickness",
+        clause: "5.10.4", equation: "1.0 ≤ s/d1 ≤ 3.0",
+        status: "out-of-scope", result: "OUTSIDE IMPLEMENTED SCOPE",
+        note: `s/dp = ${fmt(sOverDp, 4)} is not greater than 3, so the web is not treated as unstiffened, but s/d1 = ${fmt(ratio, 4)} is above 3. Clause 5.10.4(a) stops at s/d1 = 3. d1 was not substituted for dp, and (d1/200) was not applied outside that range.`,
+      })
+    }
+    let min: number
+    let clauseBit: string
+    if (ratio >= 1) {
+      min = (d1 / 200) * root
+      clauseBit = "(d1/200) √(fy/250) for 1.0 ≤ s/d1 ≤ 3.0"
+    } else if (ratio > 0.74) {
+      min = (input.sMm / 200) * root
+      clauseBit = "(s/200) √(fy/250) for 0.74 < s/d1 < 1.0"
+    } else {
+      min = (d1 / 270) * root
+      clauseBit = "(d1/270) √(fy/250) for s/d1 ≤ 0.74"
+    }
+    return blankCheck({
+      id: "web-thickness", group: "WEB", title: "Transversely stiffened web thickness",
+      clause: "5.10.4", equation: clauseBit,
+      status: tw + 1e-9 >= min ? "pass" : "fail",
+      result: `tw ${fmt(tw, 3)} mm vs ${fmt(min, 3)} mm`,
+      steps: [`s/d1 = ${fmt(ratio, 4)}. Minimum tw = ${fmt(min, 3)} mm.`],
+      note: "No longitudinal stiffeners in this thickness clause.",
+    })
+  }
+  if (!pos(input.d2Mm)) {
+    return data({
+      id: "web-thickness", group: "WEB", title: "Longitudinally stiffened web thickness",
+      clause: "5.10.5", equation: "tw limit using d2",
+      missing: "d2 is twice the clear distance from the neutral axis to the compression flange. It is not assumed equal to d1.",
+    })
+  }
+  const where = input.longWhere
+  if (where == null || where === "none") {
+    return data({
+      id: "web-thickness", group: "WEB", title: "Longitudinally stiffened web thickness",
+      clause: "5.10.5", equation: "stiffener position",
+      missing: "Say whether the longitudinal stiffener is at 0.2 d2 from the compression flange, at the neutral axis, or both. The clause applies when that stiffener is required.",
+    })
+  }
+  let min: number
+  let equation: string
+  if (where === "neutral") {
+    if (ratio > 1.5) {
+      return blankCheck({
+        id: "web-thickness", group: "WEB", title: "Neutral-axis stiffener thickness limit",
+        clause: "5.10.5", equation: "tw ≥ (d1/400) √(fy/250) when s/d1 ≤ 1.5",
+        status: "not-applicable", result: "NOT APPLICABLE",
+        note: "The additional neutral-axis limit is stated for s/d1 ≤ 1.5. This spacing is larger, so that limit is not applied. The 0.2 d2 set is a separate requirement.",
+      })
+    }
+    min = (d1 / 400) * root
+    equation = "tw ≥ (d1/400) √(fy/250)"
+  } else {
+    if (ratio >= 1 && ratio <= 2.4) {
+      min = (d1 / 250) * root
+      equation = "(d1/250) √(fy/250) for 1.0 ≤ s/d1 ≤ 2.4"
+    } else if (ratio >= 0.74 && ratio <= 1) {
+      min = (input.sMm / 250) * root
+      equation = "(s/250) √(fy/250) for 0.74 ≤ s/d1 ≤ 1.0"
+    } else if (ratio < 0.74) {
+      min = (d1 / 340) * root
+      equation = "(d1/340) √(fy/250) for s/d1 < 0.74"
+    } else {
+      return blankCheck({
+        id: "web-thickness", group: "WEB", title: "Longitudinally stiffened web thickness",
+        clause: "5.10.5", equation: "s/d1 > 2.4",
+        status: "out-of-scope", result: "OUTSIDE IMPLEMENTED SCOPE",
+        note: "Clause 5.10.5 states the 0.2 d2 thickness limits up to s/d1 = 2.4. A wider spacing is not given a substitute here.",
+      })
+    }
+    if (where === "both" && ratio <= 1.5) min = Math.max(min, (d1 / 400) * root)
+  }
+  return blankCheck({
+    id: "web-thickness", group: "WEB", title: "Longitudinally stiffened web thickness",
+    clause: "5.10.5", equation,
+    status: tw + 1e-9 >= min ? "pass" : "fail",
+    result: `tw ${fmt(tw, 3)} mm vs ${fmt(min, 3)} mm`,
+    steps: [`s/d1 = ${fmt(ratio, 4)}. d2 = ${fmt(input.d2Mm, 3)} mm is recorded and is not used in the thickness formula. Minimum tw = ${fmt(min, 3)} mm.`],
+    note: "d2 locates the stiffener. The thickness formula uses d1 and s as written.",
+  })
+}
+
+function shearCheck(input: DesignInput): { check: Check; vw: number | null; alphaV: number | null; dp: number | null; tw: number | null } {
+  const empty = { vw: null as number | null, alphaV: null as number | null, dp: null as number | null, tw: null as number | null }
+  if (input.role !== "web") {
+    return { check: blankCheck({
+      id: "shear", group: "SHEAR", title: "Web shear",
+      clause: "5.11", equation: "V* ≤ φ Vv",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "Clause 5.11 is a web shear check. An element that is not a web does not receive it. Elastic τcr is not φVv.",
+    }), ...empty }
+  }
+  const shearScope = outsideMaterial(input.fyMpa, input.twMm)
+  if (shearScope) {
+    return { check: scopeRow("shear", "SHEAR", "Web shear", "1.1.2", shearScope), ...empty }
+  }
+  if (!pos(input.dpMm) || !pos(input.twMm) || !pos(input.fyMpa) || input.webGross !== "gross" || !input.stiffening || !input.shearMode) {
+    return { check: data({
+      id: "shear", group: "SHEAR", title: "Web shear",
+      clause: "5.11", equation: "Vw = 0.6 fy Aw; Vu = Vw or Vb",
+      missing: "Required: panel depth dp, web thickness tw, fy, confirmation that Aw is the gross web area, uniform or non-uniform shear, and unstiffened / transverse / longitudinal stiffening. dp is not copied from the panel height.",
+    }), ...empty }
+  }
+  const dp = input.dpMm
+  const tw = input.twMm
+  const fy = input.fyMpa
+  const aw = dp * tw
+  const vw = shearYield(fy, aw)
+  const ratio = dp / tw
+  const limit = stockyLimit(fy)
+  const stocky = ratio <= limit
+  const steps = [
+    `Aw = dp × tw = ${fmt(dp, 3)} × ${fmt(tw, 3)} = ${fmt(aw, 3)} mm², gross web, no holes confirmed.`,
+    `Vw = 0.6 fy Aw = 0.6 × ${fmt(fy, 3)} × ${fmt(aw, 3)} = ${kn(vw)} (Clause 5.11.4).`,
+    `dp/tw = ${fmt(ratio, 3)}. 82/√(fy/250) = ${fmt(limit, 3)}.`,
+  ]
+  let vu = vw
+  let alphaV: number | null = null
+  const sOver = input.sMm != null && dp > 0 ? input.sMm / dp : null
+  if (input.stiffening !== "unstiffened" && sOver != null && sOver > 0 && sOver <= 3) {
+    alphaV = alphaVStiffened(ratio, fy, sOver)
+  }
+  if (!stocky) {
+    const stiffened = input.stiffening !== "unstiffened" && sOver != null && sOver <= 3 && sOver > 0
+    if (input.stiffening !== "unstiffened" && (sOver == null || !(sOver > 0))) {
+      return { check: data({
+        id: "shear", group: "SHEAR", title: "Stiffened web shear",
+        clause: "5.11.5.2", equation: "Vb = αv αd αf Vw ≤ Vw",
+        missing: "Stiffener spacing s is required and must be positive. Spacing is not read from the FEM model.",
+        steps,
+      }), vw, alphaV, dp, tw }
+    }
+    if (!stiffened) {
+      alphaV = alphaVUnstiffened(ratio, fy)
+      const vb = Math.min(vw, alphaV * vw)
+      vu = vb
+      steps.push(input.stiffening !== "unstiffened"
+        ? `s/dp = ${fmt(sOver ?? 0, 3)} > 3, so Clause 5.10.4 treats the web as unstiffened.`
+        : "Unstiffened web, Clause 5.11.5.1.")
+      steps.push(`αv = [82 / ((dp/tw) √(fy/250))]² = ${fmt(alphaV, 4)}.`)
+      steps.push(`Vb = αv Vw ≤ Vw = ${kn(vb)}. Vu = Vb because dp/tw exceeds the yield limit.`)
+    } else {
+      alphaV = alphaVStiffened(ratio, fy, sOver!)
+      const ad = alphaD(alphaV, sOver!, input.endPanel)
+      let af = 1
+      let afNote = "αf = 1.0 by Clause 5.11.5.2(a)."
+      if (input.stiffening === "longitudinal") {
+        afNote = "Longitudinal stiffeners are present, so the flange formula 5.11.5.2(b) is not used. αf = 1.0. A rational value under 5.11.5.2(c) is not supplied."
+      } else if (input.alphaF === "flange") {
+        if (!pos(input.bfoMm) || !pos(input.tfMm) || !pos(input.d1Mm)) {
+          return { check: data({
+            id: "shear", group: "SHEAR", title: "Stiffened web shear",
+            clause: "5.11.5.2(b)", equation: "αf = 1.6 − 0.6/√[1 + 40 bfo tf²/(d1² tw)]",
+            missing: "Flange restraint needs bfo (the least of 12 tf/√(fy/250), the flange outstand from the web mid-plane, and half the clear distance between webs), plus tf and d1.",
+            steps,
+          }), vw, alphaV, dp, tw }
+        }
+        af = alphaFFlange(input.bfoMm, input.tfMm, input.d1Mm, tw)
+        afNote = `αf = 1.6 − 0.6/√[1 + 40×${fmt(input.bfoMm, 3)}×${fmt(input.tfMm, 3)}²/(${fmt(input.d1Mm, 3)}²×${fmt(tw, 3)})] = ${fmt(af, 4)}. bfo must already be the least of the three Clause 5.11.5.2(b) lengths.`
+      }
+      const adText = input.endPanel ? "αd = 1.0 as required by Clause 5.15.2.2 for the end panel." : `αd = 1 + (1−αv)/(1.15 αv √(1+(s/dp)²)) = ${fmt(ad, 4)}.`
+      const vb = Math.min(vw, alphaV * ad * af * vw)
+      vu = vb
+      steps.push(`s/dp = ${fmt(sOver!, 4)} ≤ 3, Clause 5.11.5.2.`)
+      steps.push(`αv = ${fmt(alphaV, 4)} (capped at 1). ${adText} ${afNote}`)
+      steps.push(`Vb = αv αd αf Vw ≤ Vw = ${kn(vb)}.`)
+    }
+  } else {
+    steps.push("dp/tw is within the Clause 5.11.2 yield limit, so Vu = Vw. Buckling is not used for Vu.")
+    if (alphaV != null) steps.push(`Stiffened αv = ${fmt(alphaV, 4)} is kept for Clause 5.15.3 only. It does not reduce Vu.`)
+  }
+  let vv = vu
+  if (input.shearMode === "non-uniform") {
+    if (!pos(input.fvmMpa) || !pos(input.fvaMpa)) {
+      return { check: data({
+        id: "shear", group: "SHEAR", title: "Non-uniform web shear",
+        clause: "5.11.3", equation: "Vv = 2 Vu / (0.9 + f*vm/f*va) ≤ Vu",
+        missing: "Maximum and average design shear stresses from a rational elastic analysis are required. They are not taken from the FEM eigenmode.",
+        steps,
+      }), vw, alphaV, dp, tw }
+    }
+    vv = Math.min(vu, 2 * vu / (0.9 + input.fvmMpa / input.fvaMpa))
+    steps.push(`Clause 5.11.3: f*vm = ${fmt(input.fvmMpa, 3)} MPa, f*va = ${fmt(input.fvaMpa, 3)} MPa. Vv = ${kn(vv)}.`)
+  } else {
+    steps.push("Approximately uniform shear, Clause 5.11.2, so Vv = Vu.")
+  }
+  const { phi, source } = phiOf("shear")
+  const design = phi * vv
+  const action = pos(input.vStarN) || input.vStarN === 0 ? input.vStarN : null
+  const used = action == null ? null : utilisation(action, design)
+  steps.push(`Nominal Vv = ${kn(vv)}. φ = 0.90. Design shear capacity φVv = ${kn(design)}.`)
+  if (action != null) steps.push(`V* = ${kn(action)}. V*/φVv = ${fmt(used!.ratio, 4)}.`)
+  return { check: blankCheck({
+    id: "shear", group: "SHEAR", title: stocky ? "Shear yield" : "Shear buckling",
+    clause: stocky ? "5.11.2 and 5.11.4" : "5.11.5",
+    equation: "V* ≤ φ Vv, with Vv from uniform or non-uniform shear",
+    status: used?.status ?? "not-checked",
+    result: action == null ? `φVv = ${kn(design)}; V* not entered` : `${fmt(used!.ratio, 3)}`,
+    nominal: vv, nominalUnit: "N", phi, phiSource: source, designCapacity: design,
+    action, utilisation: used?.ratio ?? null, steps,
+    note: "Elastic τcr is not this capacity. Nominal Vv and design φVv are separate.",
+  }), vw, alphaV, dp, tw }
+}
+
+function interaction(input: DesignInput, shearDesign: number | null, shearNominal: number | null): Check {
+  if (input.role !== "web") {
+    return blankCheck({
+      id: "interaction", group: "INTERACTION", title: "Shear and bending",
+      clause: "5.12", equation: "V* ≤ φ Vvm",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "Clause 5.12 is for a web with bending. It is not applied to a plate element.",
+    })
+  }
+  if (input.interaction == null) {
+    return blankCheck({
+      id: "interaction", group: "INTERACTION", title: "Shear and bending",
+      clause: "5.12", equation: "5.12.2 or 5.12.3",
+      status: "not-checked", result: "NOT CHECKED",
+      note: "Choose no bending, the flange proportioning method, or the section interaction method. Neither is assumed.",
+    })
+  }
+  if (input.interaction === "none") {
+    return blankCheck({
+      id: "interaction", group: "INTERACTION", title: "Shear and bending",
+      clause: "5.12", equation: "V* ≤ φ Vv",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "No bending design action is identified, so Clause 5.12 is not applied. Shear alone remains Clause 5.11.",
+    })
+  }
+  if (shearNominal == null || shearDesign == null) {
+    return data({
+      id: "interaction", group: "INTERACTION", title: "Shear and bending",
+      clause: "5.12", equation: "Vvm from Vv",
+      missing: "Web shear capacity is not available, so the interaction cannot start.",
+    })
+  }
+  const { phi, source } = phiOf("bending")
+  if (input.interaction === "proportioning") {
+    if (!pos(input.afeMm2) || !pos(input.afgMm2) || !pos(input.afnMm2) || !pos(input.dfMm) || !pos(input.flangeFyMpa) || !pos(input.flangeFuMpa) || input.mStarNmm == null) {
+      return data({
+        id: "interaction", group: "INTERACTION", title: "Proportioning method",
+        clause: "5.12.2", equation: "Mf = Afm df fy",
+        missing: "Required: compression-flange effective area from Clause 6.2.2, flange gross area, flange net area, fu, fy, distance between flange centroids, and M*. The plate model is not turned into flanges.",
+      })
+    }
+    const tensionCap = Math.min(input.afgMm2, 0.85 * input.afnMm2 * input.flangeFuMpa / input.flangeFyMpa)
+    const afm = Math.min(input.afeMm2, tensionCap)
+    const mf = afm * input.dfMm * input.flangeFyMpa
+    const designM = phi * mf
+    const mRatio = input.mStarNmm / designM
+    const steps = [
+      `Tension-side limit = min(Afg, 0.85 Afn fu/fy) = ${fmt(tensionCap, 3)} mm².`,
+      `Afm = min(compression effective area, tension-side limit) = ${fmt(afm, 3)} mm².`,
+      `Mf = Afm df fy = ${kn(mf)}·mm / 1e6 → moment ${fmt(mf / 1e6, 3)} kN·m.`,
+      `φ = 0.90. φMf = ${fmt(designM / 1e6, 3)} kN·m. M* = ${fmt(input.mStarNmm / 1e6, 3)} kN·m.`,
+    ]
+    if (mRatio > 1) {
+      return blankCheck({
+        id: "interaction", group: "INTERACTION", title: "Proportioning method",
+        clause: "5.12.2", equation: "M* ≤ φ Mf, then Vvm = Vv",
+        status: "fail", result: `${fmt(mRatio, 3)}`,
+        phi, phiSource: source, utilisation: mRatio, action: input.mStarNmm, designCapacity: designM,
+        steps: [...steps, "M* exceeds φMf, so Clause 5.12.2 does not grant Vvm = Vv."],
+        note: "The flanges-only moment capacity is exceeded.",
+      })
+    }
+    const vAction = input.vStarN
+    const used = vAction == null ? null : utilisation(vAction, shearDesign)
+    return blankCheck({
+      id: "interaction", group: "INTERACTION", title: "Proportioning method",
+      clause: "5.12.2", equation: "M* ≤ φ Mf and V* ≤ φ Vv",
+      status: used?.status ?? "not-checked",
+      result: used ? `${fmt(Math.max(used.ratio, mRatio), 3)}` : `M*/φMf = ${fmt(mRatio, 3)}; V* not entered`,
+      phi, phiSource: source, nominal: shearNominal, nominalUnit: "N", designCapacity: shearDesign,
+      action: vAction, utilisation: used ? Math.max(used.ratio, mRatio) : null,
+      steps: [...steps, "M* ≤ φMf, so Vvm = Vv and the shear design capacity remains φVv.", used ? `V*/φVv = ${fmt(used.ratio, 4)}.` : "V* was not entered."],
+      note: "The reported utilisation needs both M* and V*. A missing action is not a governing ratio.",
+    })
+  }
+  if (!pos(input.msNmm) || input.mStarNmm == null) {
+    return data({
+      id: "interaction", group: "INTERACTION", title: "Section interaction",
+      clause: "5.12.3", equation: "Vvm = Vv [2.2 − 1.6 M*/(φ Ms)]",
+      missing: "M* and the nominal section moment capacity Ms from Clause 5.2 are required. Ms is not calculated from the bare plate, and a segment without full lateral restraint (Clause 5.6) is outside this check.",
+    })
+  }
+  const designM = phi * input.msNmm
+  const mRatio = input.mStarNmm / designM
+  let vvm = shearNominal
+  const steps = [
+    `Ms = ${fmt(input.msNmm / 1e6, 4)} kN·m, entered from a Clause 5.2 section. φMs = ${fmt(designM / 1e6, 4)} kN·m.`,
+    `M* = ${fmt(input.mStarNmm / 1e6, 4)} kN·m. M*/φMs = ${fmt(mRatio, 4)}.`,
+  ]
+  if (mRatio > 1) {
+    return blankCheck({
+      id: "interaction", group: "INTERACTION", title: "Section interaction",
+      clause: "5.12.3", equation: "formula stated only for M* ≤ φ Ms",
+      status: "fail", result: `${fmt(mRatio, 3)}`,
+      phi, phiSource: source, utilisation: mRatio,
+      steps: [...steps, "M* > φMs. Clause 5.12.3 does not define Vvm above that limit."],
+      note: "Bending section capacity is exceeded. Lateral-buckling member capacity is not evaluated.",
+    })
+  }
+  if (input.mStarNmm > 0.75 * designM) {
+    vvm = shearNominal * (2.2 - (1.6 * input.mStarNmm) / designM)
+    steps.push(`0.75 φMs < M* ≤ φMs, so Vvm = Vv [2.2 − 1.6 M*/(φ Ms)] = ${kn(vvm)}.`)
+  } else {
+    steps.push("M* ≤ 0.75 φMs, so Vvm = Vv.")
+  }
+  const designV = phi * vvm
+  const used = input.vStarN == null ? null : utilisation(input.vStarN, designV)
+  const ratio = used ? Math.max(used.ratio, mRatio) : null
+  return blankCheck({
+    id: "interaction", group: "INTERACTION", title: "Section interaction",
+    clause: "5.12.3", equation: "V* ≤ φ Vvm",
+    status: used?.status ?? "not-checked",
+    result: used ? `${fmt(ratio!, 3)}` : `M*/φMs = ${fmt(mRatio, 3)}; φVvm = ${kn(designV)}; V* not entered`,
+    nominal: vvm, nominalUnit: "N", phi, phiSource: source, designCapacity: designV,
+    action: input.vStarN, utilisation: ratio,
+    steps: [...steps, `φ = 0.90. φVvm = ${kn(designV)}.`],
+    note: "φ is the bending capacity factor on Ms and the shear factor on Vvm, both 0.90 from Table 3.4. They are not γM.",
+  })
+}
+
+function bearing(input: DesignInput): Check[] {
+  if (input.role !== "web") {
+    return [blankCheck({
+      id: "bearing", group: "BEARING", title: "Web bearing",
+      clause: "5.13", equation: "R* ≤ φ Rb",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "The elastic patch load is not a Clause 5.13 bearing check, and this plate is not identified as a web.",
+    })]
+  }
+  if (input.bearing == null) {
+    return [blankCheck({
+      id: "bearing", group: "BEARING", title: "Web bearing",
+      clause: "5.13", equation: "Rb = min(Rby, Rbb)",
+      status: "not-checked", result: "NOT CHECKED",
+      note: "Bearing is not addressed. Choose none, an I or C web, or an RHS. The FEM patch eigenvalue is not Rb.",
+    })]
+  }
+  if (input.bearing === "none") {
+    return [blankCheck({
+      id: "bearing", group: "BEARING", title: "Web bearing",
+      clause: "5.13", equation: "R* ≤ φ Rb",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "No compressive bearing force is identified.",
+    })]
+  }
+  if (input.bearing === "rhs") {
+    return [blankCheck({
+      id: "bearing", group: "BEARING", title: "RHS web bearing",
+      clause: "5.13.3 and Figure 5.13.1.3", equation: "Rby = 2 bb t fy αp",
+      status: "out-of-scope", result: "OUTSIDE IMPLEMENTED SCOPE",
+      note: "The RHS coefficient αp and the interior/end bearing widths in Figure 5.13.1.3 are not implemented. Clause 5.13.5 combined bending and bearing is also not implemented. No RHS capacity is reported.",
+    })]
+  }
+  const bearingScope = outsideMaterial(input.fyMpa, input.twMm)
+  if (bearingScope) return [scopeRow("bearing", "BEARING", "I or C web bearing", "1.1.2", bearingScope)]
+  if (input.stiffening == null) {
+    return [data({
+      id: "bearing", group: "BEARING", title: "I or C web bearing",
+      clause: "5.13.4", equation: "Rbb for a web without transverse stiffeners",
+      missing: "Clause 5.13.4 applies to an I-section or C-section web without transverse stiffeners. State that the web is unstiffened, or design a load-bearing stiffener to Clause 5.14. The patch eigenvalue is not Rbb.",
+    })]
+  }
+  if (input.stiffening !== "unstiffened") {
+    return [blankCheck({
+      id: "bearing", group: "BEARING", title: "I or C web bearing",
+      clause: "5.13.4", equation: "Rbb for a web without transverse stiffeners",
+      status: "out-of-scope", result: "OUTSIDE IMPLEMENTED SCOPE",
+      note: "A bearing force is identified, but Clause 5.13.4 does not cover a transversely or longitudinally stiffened web. No unstiffened φRb is reported. Clause 5.14 is the stiffener path. Appendix I is informative and is not φRb.",
+    })]
+  }
+  if (!pos(input.twMm) || !pos(input.fyMpa) || !pos(input.d1Mm) || input.flangesRestrained == null) {
+    return [data({
+      id: "bearing", group: "BEARING", title: "I or C web bearing",
+      clause: "5.13.3 and 5.13.4", equation: "Rby = 1.25 bbf tw fy; Rbb from Section 6",
+      missing: "Required: tw, fy, clear depth d1, and whether both flanges are restrained against lateral movement (2.5 d1/tw) or not (5.0 d1/tw).",
+    })]
+  }
+  let bbf = input.bbfMm
+  let bb = input.bbMm
+  const steps: string[] = []
+  if (input.deriveWidth) {
+    if (!pos(input.bsMm) || !pos(input.bearingTfMm) || !input.bearingPlace) {
+      return [data({
+        id: "bearing", group: "BEARING", title: "Bearing dispersion",
+        clause: "5.13.1 and Figure 5.13.1.1", equation: "bbf = bs + 5 tf",
+        missing: "Dispersion needs the stiff bearing length bs, flange thickness tf, and interior or end.",
+      })]
+    }
+    bbf = input.bsMm + 5 * input.bearingTfMm
+    bb = input.bearingPlace === "interior" ? bbf + input.d1Mm : bbf + input.d1Mm / 2
+    steps.push(`Figure 5.13.1.1: bbf = bs + 5 tf = ${fmt(input.bsMm, 3)} + 5×${fmt(input.bearingTfMm, 3)} = ${fmt(bbf, 3)} mm (2.5:1 through the flange, both sides).`)
+    steps.push(input.bearingPlace === "interior"
+      ? `Interior 1:1 dispersion to the neutral axis: bb = bbf + d1 = ${fmt(bb, 3)} mm.`
+      : `End 1:1 dispersion on the span side only: bb = bbf + d1/2 = ${fmt(bb, 3)} mm. If the member end cuts this width, enter bb directly instead.`)
+  }
+  if (!pos(bbf) || !pos(bb)) {
+    return [data({
+      id: "bearing", group: "BEARING", title: "I or C web bearing",
+      clause: "5.13.3", equation: "Rby = 1.25 bbf tw fy",
+      missing: "Enter bbf and bb, or derive them from bs, tf and interior/end. bbf is the bearing width at the web shown in Figure 5.13.1.1.",
+      steps,
+    })]
+  }
+  const rby = 1.25 * bbf * input.twMm * input.fyMpa
+  const leOverR = (input.flangesRestrained ? 2.5 : 5) * input.d1Mm / input.twMm
+  const area = input.twMm * bb
+  const column = columnCapacity({ leOverR, fyMpa: input.fyMpa, areaMm2: area, alphaB: 0.5, kf: 1 })
+  const rbb = column.nc
+  const rb = Math.min(rby, rbb)
+  const { phi, source } = phiOf("bearing")
+  const design = phi * rb
+  const action = input.rStarN
+  const used = action == null ? null : utilisation(action, design)
+  steps.push(`Rby = 1.25 × ${fmt(bbf, 3)} × ${fmt(input.twMm, 3)} × ${fmt(input.fyMpa, 3)} = ${kn(rby)} (Clause 5.13.3).`)
+  steps.push(`Clause 5.13.4: αb = 0.5, kf = 1.0, area = tw bb = ${fmt(area, 3)} mm².`)
+  steps.push(`le/r = ${input.flangesRestrained ? "2.5" : "5.0"} d1/tw = ${fmt(leOverR, 3)}.`)
+  steps.push(`λn = (le/r) √(kf) √(fy/250) = ${fmt(column.lambdaN, 3)}. αc = ${fmt(column.alpha, 4)} from Clause 6.3.3.`)
+  steps.push(`Rbb = αc Ns = ${kn(rbb)}. Rb = min(Rby, Rbb) = ${kn(rb)}.`)
+  steps.push(`φ = 0.90. φRb = ${kn(design)}.`)
+  return [blankCheck({
+    id: "bearing", group: "BEARING", title: "I or C web bearing",
+    clause: "5.13.2", equation: "Rb = min(Rby, Rbb); R* ≤ φ Rb",
+    status: used?.status ?? "not-checked",
+    result: action == null ? `φRb = ${kn(design)}; R* not entered` : `${fmt(used!.ratio, 3)}`,
+    nominal: rb, nominalUnit: "N", phi, phiSource: source, designCapacity: design,
+    action, utilisation: used?.ratio ?? null, steps,
+    note: "The elastic patch buckling load is not Rbb. Yield and buckling are both calculated; the lesser nominal value is used.",
+  })]
+}
+
+function gammaOf(arrangement: DesignInput["arrangement"]): number | null {
+  if (arrangement === "pair") return 1
+  if (arrangement === "single-angle") return 1.8
+  if (arrangement === "single-plate") return 2.4
+  return null
+}
+
+function stiffenerSection(input: DesignInput, fy: number, tw: number): { ok: true; area: number; inertia: number; ry: number; steps: string[] } | { ok: false; missing: string } {
+  if (!pos(input.sMm)) return { ok: false, missing: "Adjacent stiffener spacing s is required so the web length each side can be limited to s/2." }
+  const each = Math.min(17.5 * tw / Math.sqrt(fy / 250), input.sMm / 2)
+  const webWidth = 2 * each
+  const aWeb = tw * webWidth
+  const iWeb = webWidth * tw ** 3 / 12
+  const steps = [
+    `Web length each side of the stiffener centreline = min(17.5 tw/√(fy/250), s/2) = ${fmt(each, 3)} mm (Clause 5.14.2).`,
+    `Web strip area = ${fmt(aWeb, 3)} mm². Web strip I about the web centreline = ${fmt(iWeb, 3)} mm⁴.`,
+  ]
+  if (pos(input.isMm4) && pos(input.asMm2)) {
+    const area = input.asMm2 + aWeb
+    const inertia = input.isMm4 + iWeb
+    steps.push(`Entered stiffener area ${fmt(input.asMm2, 3)} mm² and I ${fmt(input.isMm4, 4)} mm⁴ about the web centreline, excluding the web strip.`)
+    return { ok: true, area, inertia, ry: Math.sqrt(inertia / area), steps }
+  }
+  if ((input.arrangement === "pair" || input.arrangement === "single-plate") && pos(input.tsMm) && pos(input.besMm)) {
+    const one = input.tsMm * input.besMm
+    const as = input.arrangement === "pair" ? 2 * one : one
+    if (pos(input.asMm2) && Math.abs(input.asMm2 - as) / as > 0.01) {
+      return { ok: false, missing: "The entered stiffener area does not match ts × bes for the selected arrangement. One of them is wrong." }
+    }
+    const ys = tw / 2 + input.besMm / 2
+    const iOwn = input.tsMm * input.besMm ** 3 / 12
+    if (input.arrangement === "pair") {
+      const inertia = 2 * (iOwn + one * ys * ys) + iWeb
+      const area = as + aWeb
+      steps.push(`Pair of flat plates, each ${fmt(input.besMm, 3)} × ${fmt(input.tsMm, 3)} mm. I is about the axis parallel to the web.`)
+      return { ok: true, area, inertia, ry: Math.sqrt(inertia / area), steps }
+    }
+    const area = as + aWeb
+    const yBar = (as * ys) / area
+    const inertia = iOwn + as * (ys - yBar) ** 2 + iWeb + aWeb * yBar ** 2
+    steps.push(`Single flat plate ${fmt(input.besMm, 3)} × ${fmt(input.tsMm, 3)} mm. Centroid is offset from the web centreline.`)
+    return { ok: true, area, inertia, ry: Math.sqrt(inertia / area), steps }
+  }
+  return { ok: false, missing: "Stiffener buckling needs either a flat-plate outstand and thickness, or As and Is about the axis parallel to the web. A single angle is not given an I from area alone." }
+}
+
+function stiffeners(input: DesignInput, shear: { vw: number | null; alphaV: number | null; dp: number | null; tw: number | null }): Check[] {
+  if (input.role !== "web") {
+    return [blankCheck({
+      id: "stiffener", group: "STIFFENER", title: "Stiffener design",
+      clause: "5.14 / 5.15 / 5.16", equation: "web stiffener clauses",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "Stiffener clauses 5.14 to 5.16 are web clauses. FEM EI is not an AS 4100 stiffener capacity.",
+    })]
+  }
+  if (input.stiffener == null) {
+    return [blankCheck({
+      id: "stiffener", group: "STIFFENER", title: "Stiffener design",
+      clause: "5.14 / 5.15 / 5.16", equation: "area, stiffness and strength",
+      status: "not-checked", result: "NOT CHECKED",
+      note: "State none, intermediate transverse, load-bearing, or longitudinal. A line in the FEM model does not select the clause.",
+    })]
+  }
+  if (input.stiffener === "none") {
+    return [blankCheck({
+      id: "stiffener", group: "STIFFENER", title: "Stiffener design",
+      clause: "5.15", equation: "no stiffener",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "No web stiffener is identified. Unstiffened shear and thickness checks still apply where selected.",
+    })]
+  }
+  const stiffScope = outsideMaterial(input.fysMpa, input.tsMm) ?? outsideMaterial(input.fyMpa, input.twMm)
+  if (stiffScope) return [scopeRow("stiffener", "STIFFENER", "Stiffener design", "1.1.2", stiffScope)]
+  const out: Check[] = []
+  const { phi, source } = phiOf("stiffener")
+  if (pos(input.besMm) && pos(input.tsMm) && pos(input.fysMpa) && !input.outerStiffened) {
+    const limit = 15 * input.tsMm / Math.sqrt(input.fysMpa / 250)
+    const ok = input.besMm <= limit + 1e-9
+    out.push(blankCheck({
+      id: "stiffener-outstand", group: "STIFFENER", title: "Stiffener outstand",
+      clause: "5.14.3", equation: "bes ≤ 15 ts / √(fys/250)",
+      status: ok ? "pass" : "fail",
+      result: `bes ${fmt(input.besMm, 3)} mm vs ${fmt(limit, 3)} mm`,
+      phi: null, phiSource: "",
+      steps: [`Limit = 15 × ${fmt(input.tsMm, 3)} / √(${fmt(input.fysMpa, 3)}/250) = ${fmt(limit, 3)} mm.`],
+      note: "Clause 5.15.6 points intermediate stiffeners to this outstand limit.",
+    }))
+  } else if (input.outerStiffened) {
+    out.push(blankCheck({
+      id: "stiffener-outstand", group: "STIFFENER", title: "Stiffener outstand",
+      clause: "5.14.3", equation: "limit waived when the outer edge is continuously stiffened",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "The outer edge is identified as continuously stiffened, so the flat-outstand limit is not applied.",
+    }))
+  } else {
+    out.push(data({
+      id: "stiffener-outstand", group: "STIFFENER", title: "Stiffener outstand",
+      clause: "5.14.3", equation: "bes ≤ 15 ts / √(fys/250)",
+      missing: "Outstand bes, thickness ts and stiffener yield stress fys are required, unless the outer edge is continuously stiffened.",
+    }))
+  }
+
+  if (input.stiffener === "longitudinal" || input.longWhere === "compression" || input.longWhere === "neutral" || input.longWhere === "both") {
+    if (!pos(input.d2Mm) || !pos(input.twMm)) {
+      out.push(data({
+        id: "longitudinal", group: "STIFFENER", title: "Longitudinal stiffener stiffness",
+        clause: "5.16.2", equation: "Is ≥ 4 d2 tw³ [1 + 4 r (1 + r)], r = As/(d2 tw)",
+        missing: "d2 and tw are required. The stiffener is checked only when you say it is required.",
+      }))
+    } else if (input.longWhere == null || input.longWhere === "none") {
+      out.push(blankCheck({
+        id: "longitudinal", group: "STIFFENER", title: "Longitudinal stiffener stiffness",
+        clause: "5.16.2", equation: "when required",
+        status: "not-checked", result: "NOT CHECKED",
+        note: "Clause 5.16.2 applies when a longitudinal stiffener is required at 0.2 d2 or at the neutral axis. That choice is not made.",
+      }))
+    } else if (!pos(input.isLongMm4) || (input.longWhere !== "neutral" && !pos(input.asLongMm2))) {
+      out.push(data({
+        id: "longitudinal", group: "STIFFENER", title: "Longitudinal stiffener stiffness",
+        clause: "5.16.2", equation: "Is about the face of the web",
+        missing: "Enter Is about the face of the web. The 0.2 d2 stiffener also needs its area As.",
+      }))
+    } else {
+      const d2 = input.d2Mm
+      const tw = input.twMm
+      const r = (input.asLongMm2 ?? 0) / (d2 * tw)
+      const atCompression = 4 * d2 * tw ** 3 * (1 + 4 * r * (1 + r))
+      const atNeutral = d2 * tw ** 3
+      const need = input.longWhere === "neutral" ? atNeutral : input.longWhere === "compression" ? atCompression : Math.max(atCompression, atNeutral)
+      const ok = input.isLongMm4 + 1e-6 >= need
+      out.push(blankCheck({
+        id: "longitudinal", group: "STIFFENER", title: "Longitudinal stiffener stiffness",
+        clause: "5.16.2", equation: "Is ≥ 4 d2 tw³ [1 + 4 (As/(d2 tw)) (1 + As/(d2 tw))]",
+        status: ok ? "pass" : "fail",
+        result: `Is ${fmt(input.isLongMm4, 4)} mm⁴ vs ${fmt(need, 4)} mm⁴`,
+        steps: [
+          `r = As/(d2 tw) = ${fmt(r, 4)}.`,
+          `Compression-flange stiffener requirement = ${fmt(atCompression, 4)} mm⁴.`,
+          `Neutral-axis stiffener requirement = d2 tw³ = ${fmt(atNeutral, 4)} mm⁴.`,
+        ],
+        note: "Checked because this stiffener was identified as required. FEM GJ is not Is.",
+      }))
+    }
+  }
+
+  if (input.stiffener === "intermediate" || input.stiffener === "load-bearing") {
+    const gamma = gammaOf(input.arrangement)
+    if (input.stiffener === "intermediate") {
+      if (shear.alphaV == null || shear.vw == null || !pos(shear.dp) || !pos(input.sMm) || gamma == null || input.webGross !== "gross") {
+        out.push(data({
+          id: "stiffener-area", group: "STIFFENER", title: "Intermediate stiffener area",
+          clause: "5.15.3", equation: "As ≥ 0.5 γ Aw (1−αv) [(s/dp)² − (s/dp)²/√(1+(s/dp)²)]",
+          missing: "Needs a stiffened-web αv, gross Aw, spacing s, dp, and pair / single-angle / single-plate.",
+        }))
+      } else {
+        const sOver = input.sMm / shear.dp
+        const bracket = sOver ** 2 - sOver ** 2 / Math.sqrt(1 + sOver ** 2)
+        const aw = shear.dp * (shear.tw ?? input.twMm ?? 0)
+        const required = Math.max(0, 0.5 * gamma * aw * (1 - shear.alphaV) * bracket)
+        const provided = input.asMm2
+        const status = provided == null ? "not-checked" : provided + 1e-9 >= required ? "pass" : "fail"
+        out.push(blankCheck({
+          id: "stiffener-area", group: "STIFFENER", title: "Intermediate stiffener area",
+          clause: "5.15.3", equation: "As ≥ 0.5 γ Aw (1−αv) [(s/dp)² − (s/dp)²/√(1+(s/dp)²)]",
+          status, result: provided == null ? `required ≥ ${fmt(required, 3)} mm²` : `${fmt(provided, 3)} mm² vs ${fmt(required, 3)} mm²`,
+          steps: [`γ = ${gamma}. αv = ${fmt(shear.alphaV, 4)}. Bracket = ${fmt(bracket, 4)}. Required As = ${fmt(required, 3)} mm².`],
+          note: "External loads on the stiffener are not included. Clause 5.15.7 is separate.",
+        }))
+      }
+      if (pos(input.d1Mm) && pos(input.twMm) && pos(input.sMm) && pos(input.isMm4)) {
+        const sOverD = input.sMm / input.d1Mm
+        const requiredI = sOverD <= Math.SQRT2
+          ? 0.75 * input.d1Mm * input.twMm ** 3
+          : 1.5 * input.d1Mm * input.twMm ** 3 / sOverD ** 2
+        let extra = 0
+        const extraOn = input.fnN != null || input.fpN != null || input.mpNmm != null
+        if (extraOn) {
+          if (input.modulusMpa == null || !(input.modulusMpa > 0)) {
+            out.push(data({
+              id: "stiffener-stiffness", group: "STIFFENER", title: "Intermediate stiffener stiffness",
+              clause: "5.15.7.1", equation: "increase of Is",
+              missing: "An external force or moment is entered, so E is required for the Clause 5.15.7.1 increase. Plate E is not taken silently.",
+            }))
+          } else {
+            const fn = input.fnN ?? 0
+            const fp = input.fpN ?? 0
+            const mp = input.mpNmm ?? 0
+            const e = input.eccMm ?? 0
+            extra = input.d1Mm ** 4 * (2 * fn + (mp + fp * e) / input.d1Mm) / (phi * input.modulusMpa * input.d1Mm * input.twMm)
+          }
+        }
+        if (!out.some((row) => row.id === "stiffener-stiffness" && row.status === "data-required")) {
+          const need = requiredI + Math.max(0, extra)
+          const ok = input.isMm4 + 1e-6 >= need
+          out.push(blankCheck({
+            id: "stiffener-stiffness", group: "STIFFENER", title: "Intermediate stiffener stiffness",
+            clause: "5.15.5", equation: "Is ≥ 0.75 d1 tw³, or 1.5 d1 tw³ / (s/d1)²",
+            status: ok ? "pass" : "fail",
+            result: `Is ${fmt(input.isMm4, 4)} mm⁴ vs ${fmt(need, 4)} mm⁴`,
+            steps: [
+              `s/d1 = ${fmt(sOverD, 4)}. Base Is = ${fmt(requiredI, 4)} mm⁴.`,
+              "The second limit printed in Clause 5.15.5 is Is ≥ 1.5 d1³ tw³ / s² for s/d1 > √2. That is the same as 1.5 d1 tw³ / (s/d1)². Both sides are a second moment of area (length⁴). The first limit is Is ≥ 0.75 d1 tw³ for s/d1 ≤ √2. They meet at s/d1 = √2.",
+              extraOn ? `Clause 5.15.7.1 increase = ${fmt(extra, 4)} mm⁴.` : "No external force was entered, so Clause 5.15.7.1 is not added.",
+            ],
+            note: "Is is about the centreline of the web.",
+          }))
+        }
+      } else {
+        out.push(data({
+          id: "stiffener-stiffness", group: "STIFFENER", title: "Intermediate stiffener stiffness",
+          clause: "5.15.5", equation: "Is ≥ 0.75 d1 tw³ or 1.5 d1 tw³/(s/d1)²",
+          missing: "d1, tw, s and Is about the web centreline are required.",
+        }))
+      }
+    }
+
+    if (!pos(input.fyMpa) || !pos(input.twMm) || !pos(input.d1Mm) || input.fysMpa == null) {
+      out.push(data({
+        id: "stiffener-strength", group: "STIFFENER", title: "Stiffener strength",
+        clause: input.stiffener === "load-bearing" ? "5.14" : "5.15.4",
+        equation: "Rsb from Clause 6.3.3 with αb = 0.5 and kf = 1",
+        missing: "fy, fys, tw and d1 are required. If fys differs from fy, Section 6 has one yield stress and this check stops.",
+      }))
+    } else if (Math.abs(input.fysMpa - input.fyMpa) > 0.05) {
+      out.push(blankCheck({
+        id: "stiffener-strength", group: "STIFFENER", title: "Stiffener strength",
+        clause: "5.14.2", equation: "Section 6 with one fy",
+        status: "data-required", result: "VERIFIED STANDARD DATA REQUIRED",
+        note: `Stiffener fys ${fmt(input.fysMpa, 3)} MPa differs from web fy ${fmt(input.fyMpa, 3)} MPa. Clause 5.14.2 points to Section 6, which is written for one yield stress. No hybrid capacity is invented.`,
+      }))
+    } else {
+      const section = stiffenerSection(input, input.fyMpa, input.twMm)
+      if (!section.ok) {
+        out.push(data({
+          id: "stiffener-strength", group: "STIFFENER", title: "Stiffener buckling",
+          clause: "5.14.2", equation: "Nc = αc Ns",
+          missing: section.missing,
+        }))
+      } else {
+        const leFactor = input.stiffener === "intermediate" ? 1 : input.stiffenerLe === "0.7d1" ? 0.7 : input.stiffenerLe === "d1" ? 1 : null
+        if (leFactor == null) {
+          out.push(data({
+            id: "stiffener-strength", group: "STIFFENER", title: "Load-bearing stiffener buckling",
+            clause: "5.14.2", equation: "le = 0.7 d1 or d1",
+            missing: "Say whether the flanges restrain rotation in the plane of the stiffener (le = 0.7 d1) or not (le = d1).",
+            steps: section.steps,
+          }))
+        } else {
+          const le = leFactor * input.d1Mm
+          const column = columnCapacity({
+            leOverR: le / section.ry, fyMpa: input.fyMpa, areaMm2: section.area, alphaB: 0.5, kf: 1,
+          })
+          const steps = [
+            ...section.steps,
+            `le = ${leFactor === 1 && input.stiffener === "intermediate" ? "d1 (Clause 5.15.4)" : leFactor === 0.7 ? "0.7 d1" : "d1"} = ${fmt(le, 3)} mm.`,
+            `ry = ${fmt(section.ry, 3)} mm. λn = ${fmt(column.lambdaN, 3)}. αc = ${fmt(column.alpha, 4)}.`,
+            `Rsb = αc × 1.0 × ${fmt(section.area, 3)} × ${fmt(input.fyMpa, 3)} = ${kn(column.nc)}.`,
+          ]
+          if (input.stiffener === "load-bearing") {
+            if (!pos(input.bbfMm)) {
+              out.push(data({
+                id: "stiffener-strength", group: "STIFFENER", title: "Load-bearing stiffener yield",
+                clause: "5.14.1", equation: "Rsy = Rby + As fys",
+                missing: "bbf is required so Rby = 1.25 bbf tw fy can be added to As fys.",
+                steps,
+              }))
+            } else if (!pos(input.asMm2)) {
+              out.push(data({
+                id: "stiffener-strength", group: "STIFFENER", title: "Load-bearing stiffener yield",
+                clause: "5.14.1", equation: "Rsy = Rby + As fys",
+                missing: "Stiffener area As in contact with the flange is required.",
+                steps,
+              }))
+            } else {
+              const rby = 1.25 * input.bbfMm * input.twMm * input.fyMpa
+              const rsy = rby + input.asMm2 * input.fysMpa
+              const designY = phi * rsy
+              const designB = phi * column.nc
+              const action = input.rStarN
+              const yUse = action == null ? null : utilisation(action, designY)
+              const bUse = action == null ? null : utilisation(action, designB)
+              const ratio = yUse && bUse ? Math.max(yUse.ratio, bUse.ratio) : null
+              out.push(blankCheck({
+                id: "stiffener-strength", group: "STIFFENER", title: "Load-bearing stiffener",
+                clause: "5.14.1 and 5.14.2", equation: "R* ≤ φ Rsy and R* ≤ φ Rsb",
+                status: ratio == null ? "not-checked" : ratio <= 1 ? "pass" : "fail",
+                result: ratio == null ? `φRsy = ${kn(designY)}; φRsb = ${kn(designB)}` : `${fmt(ratio, 3)}`,
+                nominal: Math.min(rsy, column.nc), nominalUnit: "N", phi, phiSource: source,
+                designCapacity: Math.min(designY, designB), action, utilisation: ratio,
+                steps: [...steps, `Rby = ${kn(rby)}. Rsy = Rby + As fys = ${kn(rsy)}. φRsy = ${kn(designY)}. φRsb = ${kn(designB)}.`],
+                note: "Both yield and buckling are required. The governing utilisation is the larger ratio.",
+              }))
+            }
+          } else if (shear.vw != null && shear.alphaV != null && pos(shear.dp)) {
+            const vb = Math.min(shear.vw, shear.alphaV * shear.vw)
+            const design = phi * (column.nc + vb)
+            const action = input.vStarN
+            const used = action == null ? null : utilisation(action, design)
+            out.push(blankCheck({
+              id: "stiffener-strength", group: "STIFFENER", title: "Intermediate stiffener buckling",
+              clause: "5.15.4", equation: "V* ≤ φ (Rsb + Vb) with αd = 1 and αf = 1",
+              status: used?.status ?? "not-checked",
+              result: action == null ? `φ(Rsb+Vb) = ${kn(design)}` : `${fmt(used!.ratio, 3)}`,
+              nominal: column.nc + vb, nominalUnit: "N", phi, phiSource: source, designCapacity: design,
+              action, utilisation: used?.ratio ?? null,
+              steps: [...steps, `Vb uses αd = 1 and αf = 1, so Vb = ${kn(vb)}. φ(Rsb+Vb) = ${kn(design)}.`],
+              note: "This Vb is not the shear capacity used in Clause 5.11, because αd and αf are set to 1.",
+            }))
+          } else {
+            out.push(data({
+              id: "stiffener-strength", group: "STIFFENER", title: "Intermediate stiffener buckling",
+              clause: "5.15.4", equation: "V* ≤ φ(Rsb+Vb)",
+              missing: "Shear yield Vw and stiffened αv are required before Vb can be added to Rsb.",
+              steps,
+            }))
+          }
+        }
+      }
+    }
+
+    if (input.stiffener === "intermediate" && pos(input.twMm) && pos(input.fyMpa) && pos(input.besMm)) {
+      const required = 0.0008 * input.twMm ** 2 * input.fyMpa / input.besMm
+      const provided = input.weldKnPerMm
+      out.push(blankCheck({
+        id: "stiffener-weld", group: "STIFFENER", title: "Stiffener-to-web connection",
+        clause: "5.15.8", equation: "0.0008 tw² fy / bes",
+        status: provided == null ? "not-checked" : provided + 1e-9 >= required ? "pass" : "fail",
+        result: provided == null ? `required ${fmt(required, 4)} kN/mm` : `${fmt(provided, 4)} vs ${fmt(required, 4)} kN/mm`,
+        steps: [`With tw and bes in mm and fy in MPa, the required design shear is ${fmt(required, 4)} kN/mm.`],
+        note: "Compared only with a weld capacity you enter. Nothing is assumed about the weld size.",
+      }))
+    }
+  }
+
+  if (input.endPost) {
+    if (shear.alphaV == null || shear.vw == null || !pos(input.d1Mm) || !pos(input.fyMpa) || !pos(input.endGapMm) || input.vStarN == null) {
+      out.push(data({
+        id: "end-post", group: "STIFFENER", title: "End post",
+        clause: "5.15.9", equation: "Aep ≥ d1 [(V*/φ) − αv Vw] / (8 e fy)",
+        missing: "End-post area needs d1, fy, the gap e between the end plate and the load-bearing stiffener, V*, αv and Vw.",
+      }))
+    } else {
+      const demand = input.d1Mm * (input.vStarN / phi - shear.alphaV * shear.vw) / (8 * input.endGapMm * input.fyMpa)
+      const required = Math.max(0, demand)
+      const provided = input.aepMm2
+      out.push(blankCheck({
+        id: "end-post", group: "STIFFENER", title: "End post area",
+        clause: "5.15.9", equation: "Aep ≥ d1 [(V*/φ) − αv Vw] / (8 e fy)",
+        status: provided == null ? "not-checked" : provided + 1e-9 >= required ? "pass" : "fail",
+        result: provided == null ? `required ≥ ${fmt(required, 3)} mm²` : `${fmt(provided, 3)} mm² vs ${fmt(required, 3)} mm²`,
+        phi, phiSource: source,
+        steps: [`Uncapped expression = ${fmt(demand, 3)} mm². Required area = ${fmt(required, 3)} mm². The load-bearing stiffener itself is still Clause 5.14.`],
+        note: "A negative expression means V*/φ does not exceed αv Vw, so the area inequality does not demand plate area.",
+      }))
+    }
+  }
+
+  if (input.soleTorsion) {
+    if (!pos(input.asMm2) || !pos(input.isMm4) || !pos(input.d1Mm) || !pos(input.torsionDepthMm) || !pos(input.torsionTfMm) || !pos(input.rStarN) || !pos(input.fMemberN)) {
+      out.push(data({
+        id: "torsion-restraint", group: "STIFFENER", title: "Torsional end restraint",
+        clause: "5.14.5", equation: "Is ≥ (αt/1000) (d³ tf R*/F*)",
+        missing: "Required when these stiffeners are the sole torsional restraint: d1, critical-flange depth d, flange thickness tf, R*, total design load F* between supports, and the pair area As and second moment Is.",
+      }))
+    } else if (input.stiffenerLe == null) {
+      out.push(data({
+        id: "torsion-restraint", group: "STIFFENER", title: "Torsional end restraint",
+        clause: "5.14.5", equation: "le from Clause 5.14.2",
+        missing: "Say whether the flanges restrain rotation in the plane of the stiffener (le = 0.7 d1) or not (le = d1). le is not assumed.",
+      }))
+    } else {
+      const sectionRy = Math.sqrt(input.isMm4 / input.asMm2)
+      const le = (input.stiffenerLe === "0.7d1" ? 0.7 : 1) * input.d1Mm
+      const slenderness = le / sectionRy
+      const alphaT = Math.min(4, Math.max(0, 230 / slenderness - 0.6))
+      const required = (alphaT / 1000) * (input.torsionDepthMm ** 3 * input.torsionTfMm * input.rStarN / input.fMemberN)
+      out.push(blankCheck({
+        id: "torsion-restraint", group: "STIFFENER", title: "Torsional end restraint",
+        clause: "5.14.5", equation: "Is ≥ (αt/1000) (d³ tf R*/F*), 0 ≤ αt ≤ 4",
+        status: input.isMm4 + 1e-6 >= required ? "pass" : "fail",
+        result: `Is ${fmt(input.isMm4, 4)} mm⁴ vs ${fmt(required, 4)} mm⁴`,
+        steps: [`le/ry = ${fmt(slenderness, 3)}. αt = 230/(le/ry) − 0.60 = ${fmt(alphaT, 4)}, limited to 0…4. ry is √(Is/As) from the entered pair, not from the web-strip section.`],
+        note: "Used only because the stiffeners were identified as the sole torsional restraint of the member.",
+      }))
+    }
+  }
+  return out
+}
+
+function openings(input: DesignInput): Check {
+  if (input.role !== "web") {
+    return blankCheck({
+      id: "openings", group: "WEB", title: "Openings",
+      clause: "5.10.7", equation: "lw/d1 limits",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "Not a web.",
+    })
+  }
+  if (input.openings == null) {
+    return blankCheck({
+      id: "openings", group: "WEB", title: "Openings",
+      clause: "5.10.7", equation: "lw/d1 ≤ 0.10 or 0.33",
+      status: "not-checked", result: "NOT CHECKED",
+      note: "Say there is no opening, or enter the greatest internal dimension. Castellated and stiffened openings need a rational analysis and are outside this check.",
+    })
+  }
+  if (input.openings === "none") {
+    return blankCheck({
+      id: "openings", group: "WEB", title: "Openings",
+      clause: "5.10.7", equation: "no opening",
+      status: "not-applicable", result: "NOT APPLICABLE",
+      note: "No web opening is identified.",
+    })
+  }
+  if (!pos(input.lwMm) || !pos(input.d1Mm)) {
+    return data({
+      id: "openings", group: "WEB", title: "Openings",
+      clause: "5.10.7", equation: "lw/d1",
+      missing: "Opening dimension lw and clear depth d1 are required. Spacing of adjacent openings is not checked unless you confirm it separately — one opening is checked here.",
+    })
+  }
+  const ratio = input.lwMm / input.d1Mm
+  const limit = input.openingStiffened ? 0.33 : 0.1
+  return blankCheck({
+    id: "openings", group: "WEB", title: "Unstiffened opening proportion",
+    clause: "5.10.7", equation: input.openingStiffened ? "lw/d1 ≤ 0.33" : "lw/d1 ≤ 0.10",
+    status: ratio <= limit + 1e-12 ? "pass" : "fail",
+    result: `lw/d1 = ${fmt(ratio, 3)} vs ${limit}`,
+    note: "The 0.33 limit applies when the member is longitudinally stiffened. It is not a capacity for a stiffened opening or a castellated member. Adjacent-opening spacing is not measured.",
+  })
+}
+
+function appendix(input: DesignInput, vv: number | null): Check {
+  if (!input.appendixI) {
+    return blankCheck({
+      id: "appendix-i", group: "APPENDIX I", title: "Stiffened web combined actions",
+      clause: "Appendix I", equation: "I.1 yield and I.2 buckling",
+      status: "not-checked", result: "NOT CHECKED", normative: false, kind: "information",
+      note: "Appendix I is informative. It is not a normative φRu. Leave it off and it is listed as not run; it does not silently pass.",
+    })
+  }
+  if (!pos(input.dpMm) || !pos(input.twMm) || !pos(input.fyMpa) || !pos(input.sMm) || !pos(input.bbfMm)) {
+    return data({
+      id: "appendix-i", group: "APPENDIX I", title: "Combined actions",
+      clause: "Appendix I", equation: "I.1 and I.2",
+      missing: "Informative check needs dp, tw, fy, s and bbf. Actions Mw*, Vw*, Nw* and Rw* are the web-panel actions in Figure I.1, not the elastic eigenvalue.",
+      normative: false, kind: "information",
+    })
+  }
+  if (input.mwNmm == null || input.vwN == null || input.nwN == null || input.rwN == null || vv == null) {
+    return data({
+      id: "appendix-i", group: "APPENDIX I", title: "Combined actions",
+      clause: "I.1", equation: "(Rw*/(φ bbf tw))² + (fw*/φ)² + (Vw*/(0.6 φ Aw))² ≤ fy²",
+      missing: "Enter the four panel actions. Vv from Clause 5.11 must already be available for I.2.",
+      normative: false, kind: "information",
+    })
+  }
+  const aw = input.dpMm * input.twMm
+  const zwe = input.twMm * input.dpMm ** 2 / 6
+  const fw = input.nwN / aw + 0.77 * input.mwNmm / zwe
+  const { phi } = phiOf("shear")
+  const termR = input.rwN / (phi * input.bbfMm * input.twMm)
+  const termF = fw / phi
+  const termV = input.vwN / (0.6 * phi * aw)
+  const yieldSide = termR ** 2 + termF ** 2 + termV ** 2
+  const fy2 = input.fyMpa ** 2
+  const root = input.dpMm / input.twMm * Math.sqrt(input.fyMpa / 250)
+  const nwo = Math.min(aw * input.fyMpa, 45 * aw * input.fyMpa / root)
+  const beta = 0.1 + 20 / root
+  const rsb = beta * input.bbfMm * input.twMm * input.fyMpa
+  const b = input.bbfMm / input.sMm
+  const alphaW = (3.4 + 2.2 * input.dpMm / input.sMm) * (0.4 + 0.5 * b)
+  const de = 1.9 * Math.sqrt(input.bbfMm * input.dpMm) / alphaW
+  const mwNominal = input.fyMpa * zwe
+  const buckle = (input.rwN / (phi * rsb)) ** 2 + (input.nwN / (phi * nwo)) ** 2 + (input.vwN / (phi * vv)) ** 2 + (input.mwNmm / (phi * mwNominal)) ** 2
+  const yieldOk = yieldSide <= fy2 + 1e-6
+  const bucklePass = buckle <= 1 + 1e-9
+  return blankCheck({
+    id: "appendix-i", group: "APPENDIX I", title: "Informative combined check",
+    clause: "I.1 and I.2", equation: "yield criterion and buckling criterion",
+    status: yieldOk && bucklePass ? "pass" : "fail",
+    normative: false, kind: "information",
+    result: `yield ${fmt(yieldSide / fy2, 3)} of fy²; buckling ${fmt(buckle, 3)}`,
+    steps: [
+      `Zwe = tw dp²/6 = ${fmt(zwe, 3)} mm³. fw* = Nw*/Aw + 0.77 Mw*/Zwe = ${fmt(fw, 3)} MPa.`,
+      `Yield left side = ${fmt(yieldSide, 4)}; fy² = ${fmt(fy2, 4)}.`,
+      `Nwo = min(Aw fy, 45 Aw fy / ((dp/tw)√(fy/250))) = ${kn(nwo)}.`,
+      `βw = 0.10 + 20/((dp/tw)√(fy/250)) = ${fmt(beta, 4)}. Rsb = βw bbf tw fy = ${kn(rsb)}.`,
+      `αw = ${fmt(alphaW, 4)} and de = ${fmt(de, 3)} mm are defined on the following page. They are not substituted, because I.2 writes Rsb = βw bbf tw fy and does not place de inside that inequality.`,
+      `Mw for I.2 is taken as fy Zwe. If the web element is slender in bending, Clause 5.2.5 does not give the gradient Ze, so this Mw is only the elastic value stated with Zwe.`,
+      `Buckling sum = ${fmt(buckle, 4)}.`,
+    ],
+    note: "Informative only. A pass here is not an AS 4100 design capacity and is excluded from the governing utilisation.",
+  })
+}
+
+export function evaluateAs4100(partial: Partial<DesignInput>): Report {
+  const input = { ...designDefaults(), ...partial }
+  const rejected = invalidInput(input)
+  if (rejected) {
+    return {
+      meta: AS4100_META,
+      checks: [blankCheck({
+        id: "input", group: "INPUT", title: "Design input",
+        clause: "1.1.2", equation: "finite positive geometry and material",
+        status: "invalid", result: "INVALID INPUT",
+        note: rejected,
+      })],
+      diagram: { edges: input.edgesSupported, stress: input.stress ?? "not selected", clearMm: input.clearWidthMm, effectiveMm: null, thicknessMm: input.thicknessMm },
+      limitations: [rejected, "No capacity was calculated from this input."],
+      governing: "No utilisation — the input is invalid",
+      governingUtil: null,
+      overall: "not-complete",
+      headline: "NOT A COMPLETE PASS — invalid input does not receive a design result",
+    }
+  }
+  const slend = slenderness(input)
+  const checks: Check[] = [...slend.checks, ...axial(input, slend.be), webThickness(input)]
+  const shear = shearCheck(input)
+  checks.push(shear.check)
+  checks.push(interaction(input, shear.check.designCapacity, shear.check.nominal))
+  checks.push(...bearing(input))
+  checks.push(...stiffeners(input, shear))
+  checks.push(openings(input))
+  checks.push(appendix(input, shear.check.nominal))
+  checks.push(blankCheck({
+    id: "member-nc", group: "OUTSIDE SCOPE", title: "Member buckling Nc",
+    clause: "6.3", equation: "Nc = αc Ns",
+    status: "out-of-scope", result: "OUTSIDE IMPLEMENTED SCOPE", kind: "information",
+    normative: false,
+    note: "A plate panel does not have member length, effective-length factor or section constant αb. Clause 6.3.3 is used only where 5.13.4 or 5.14.2 call it up for the web strip or stiffener.",
+  }))
+
+  const ranked = checks.filter((row) =>
+    row.normative
+    && row.kind === "strength"
+    && (row.status === "pass" || row.status === "fail")
+    && row.utilisation != null
+    && Number.isFinite(row.utilisation)
+  )
+  ranked.sort((a, b) => (b.utilisation ?? 0) - (a.utilisation ?? 0))
+  const top = ranked[0] ?? null
+  const blocked = checks.filter(blocks)
+  const service = checks.filter((row) => row.kind === "service" && row.status === "fail")
+  const overall = blocked.length === 0 && checks.some((row) => row.normative && row.status === "pass") ? "pass" : "not-complete"
+  const limitations = [
+    "AS 4100 DESIGN SUBSET — VERIFIED WITH LIMITATIONS. This is not complete AS 4100 design verified.",
+    "Elastic buckling stress, τcr and λFEM are not design resistances. IQ-PLB-E1.0 is unchanged by this adapter.",
+    "φ is 0.90 from Table 3.4 for the clause named on each row. No γM, EN 1993-1-5 or AS 5224 factor is used.",
+    "Outside this plate check: general member Nc (Clause 6.3 as a member capacity), lateral-torsional buckling Mb (Clause 5.6), Sections 8.3 and 8.4, RHS bearing αp and Clause 5.13.5, castellated or stiffened openings, hybrid stiffeners fys ≠ fy, and slender bending-gradient Ze where Clause 5.2.5 gives no expression.",
+    "Ms, where required by Clause 5.12.3, is an external verified input. Its calculation is outside IQ-CAL-PLB.",
+    "Appendix I is informative. It is excluded from the governing utilisation, including when it is left off.",
+    "Table 5.11.5.2 is not stored. αv αd follows Clause 5.11.5.2. Two printed cells, (100, s/dp = 1.25) and (110, s/dp = 1.0), are transposed relative to that equation (0.989 and 0.998). The equation is used.",
+    ...service.map((row) => `SERVICE — ${row.title}: ${row.result}. ${row.note}`),
+    ...blocked.map((row) => `${row.group} — ${row.title}: ${row.status === "data-required" ? "VERIFIED STANDARD DATA REQUIRED" : row.result}. ${row.note}`),
+  ]
+  const headline = overall === "pass"
+    ? service.length
+      ? "PASS FOR ALL APPLICABLE IMPLEMENTED CHECKS — SERVICE DEFORMATION WARNING — NOT COMPLETE AS 4100 DESIGN VERIFIED"
+      : "PASS FOR ALL APPLICABLE IMPLEMENTED CHECKS — NOT COMPLETE AS 4100 DESIGN VERIFIED"
+    : "NOT A COMPLETE PASS — omitted, failed or out-of-scope checks are listed and are not implied to have passed"
+  return {
+    meta: AS4100_META,
+    checks,
+    diagram: {
+      edges: input.edgesSupported,
+      stress: input.stress ?? "not selected",
+      clearMm: input.clearWidthMm,
+      effectiveMm: slend.be,
+      thicknessMm: input.thicknessMm,
+    },
+    limitations,
+    governing: top ? `${top.title} (${top.clause})` : "No utilisation until an action and a design capacity both exist",
+    governingUtil: top?.utilisation ?? null,
+    overall,
+    headline,
+  }
+}
+
+
+========================================================================
+FILE src/plate/standards/as4100/member.ts
+========================================================================
+
+/** Clause 6.3.3 closed form. Table 6.3.3(C) is not stored; tests compare this form with cells read from that table. */
+
+export function alphaC(lambdaN: number, alphaB: number): number {
+  const alphaA = (2100 * (lambdaN - 13.5)) / (lambdaN * lambdaN - 15.3 * lambdaN + 2050)
+  const lambda = lambdaN + alphaA * alphaB
+  if (!(lambda > 0)) return 1
+  const eta = Math.max(0, 0.00326 * (lambda - 13.5))
+  const ratio = lambda / 90
+  const xi = (ratio * ratio + 1 + eta) / (2 * ratio * ratio)
+  const inside = 1 - (90 / (xi * lambda)) ** 2
+  if (!(inside >= 0) || !Number.isFinite(xi)) return 1
+  return Math.min(1, xi * (1 - Math.sqrt(inside)))
+}
+
+export type ColumnInput = {
+  leOverR: number
+  fyMpa: number
+  areaMm2: number
+  alphaB: number
+  kf: number
+}
+
+/** Ns = kf An fy and Nc = αc Ns, with λn from Clause 6.3.3. Returns newtons. */
+export function columnCapacity(input: ColumnInput): { lambdaN: number; alpha: number; ns: number; nc: number } {
+  const lambdaN = input.leOverR * Math.sqrt(input.kf) * Math.sqrt(input.fyMpa / 250)
+  const alpha = alphaC(lambdaN, input.alphaB)
+  const ns = input.kf * input.areaMm2 * input.fyMpa
+  return { lambdaN, alpha, ns, nc: alpha * ns }
+}
+
+
+========================================================================
+FILE src/plate/standards/as4100/shared.ts
+========================================================================
+
+/** AS 4100:2020 (incorporating Amendment No. 1) plate/web adapter.
+ * Numbers below were read from the licensed PDF for this project.
+ * They are not copied into EN 1993 or AS 5224.
+ */
+export const AS4100_META = {
+  standard: "AS 4100",
+  edition: "2020",
+  amendment: "1",
+  /** Frozen plate/web subset. Do not change the adapter without re-running the D1.0 suite. */
+  dataset: "IQ-PLB-AS4100-D1.0",
+  freeze: "IQ-PLB-AS4100-D1.0",
+  date: "2026-10-07",
+  suite: "D1.0",
+} as const
+
+export type CheckStatus =
+  | "pass"
+  | "fail"
+  | "not-applicable"
+  | "not-checked"
+  | "out-of-scope"
+  | "data-required"
+  | "invalid"
+
+export type CheckKind = "strength" | "service" | "classification" | "information"
+
+export type Check = {
+  id: string
+  group: string
+  title: string
+  clause: string
+  equation: string
+  steps: string[]
+  result: string
+  note: string
+  status: CheckStatus
+  kind: CheckKind
+  /** False for an informative appendix row so it cannot be read as φRu. */
+  normative: boolean
+  nominal: number | null
+  nominalUnit: string
+  phi: number | null
+  phiSource: string
+  designCapacity: number | null
+  action: number | null
+  utilisation: number | null
+}
+
+export type Residual = "SR" | "HR" | "LW" | "CF" | "HW"
+
+export type DesignInput = {
+  role: "element" | "web" | null
+  clearWidthMm: number | null
+  thicknessMm: number | null
+  fyMpa: number | null
+  fuMpa: number | null
+  residual: Residual | null
+  edgesSupported: "one" | "both" | null
+  stress: "uniform-compression" | "edge-gradient" | "outstand-gradient" | null
+  kb: number | null
+  widthPath: "primary" | "alternative"
+  holes: "none" | "net" | null
+  anMm2: number | null
+  axial: "none" | "compression" | "tension" | null
+  nStarN: number | null
+  kt: number | null
+  vStarN: number | null
+  mStarNmm: number | null
+  msNmm: number | null
+  rStarN: number | null
+  shearMode: "uniform" | "non-uniform" | null
+  fvmMpa: number | null
+  fvaMpa: number | null
+  dpMm: number | null
+  twMm: number | null
+  d1Mm: number | null
+  webGross: "gross" | null
+  stiffening: "unstiffened" | "transverse" | "longitudinal" | null
+  sMm: number | null
+  alphaF: "one" | "flange" | null
+  bfoMm: number | null
+  tfMm: number | null
+  endPanel: boolean
+  interaction: "none" | "proportioning" | "section" | null
+  afgMm2: number | null
+  afnMm2: number | null
+  afeMm2: number | null
+  dfMm: number | null
+  flangeFyMpa: number | null
+  flangeFuMpa: number | null
+  bearing: "none" | "ic" | "rhs" | null
+  bbfMm: number | null
+  bbMm: number | null
+  bsMm: number | null
+  bearingTfMm: number | null
+  bearingPlace: "interior" | "end" | null
+  flangesRestrained: boolean | null
+  deriveWidth: boolean
+  stiffener: "none" | "intermediate" | "load-bearing" | "longitudinal" | null
+  arrangement: "pair" | "single-plate" | "single-angle" | null
+  asMm2: number | null
+  fysMpa: number | null
+  tsMm: number | null
+  besMm: number | null
+  isMm4: number | null
+  stiffenerLe: "0.7d1" | "d1" | null
+  outerStiffened: boolean
+  soleTorsion: boolean
+  torsionDepthMm: number | null
+  torsionTfMm: number | null
+  fMemberN: number | null
+  longWhere: "none" | "compression" | "neutral" | "both" | null
+  d2Mm: number | null
+  asLongMm2: number | null
+  isLongMm4: number | null
+  openings: "none" | "open" | null
+  lwMm: number | null
+  openingStiffened: boolean
+  plasticWeb: boolean
+  webBound: "both-flanges" | "one-free" | null
+  appendixI: boolean
+  nwN: number | null
+  mwNmm: number | null
+  rwN: number | null
+  vwN: number | null
+  modulusMpa: number | null
+  fnN: number | null
+  fpN: number | null
+  mpNmm: number | null
+  eccMm: number | null
+  endPost: boolean
+  endGapMm: number | null
+  aepMm2: number | null
+  weldKnPerMm: number | null
+}
+
+export function designDefaults(): DesignInput {
+  return {
+    role: null,
+    clearWidthMm: null,
+    thicknessMm: null,
+    fyMpa: null,
+    fuMpa: null,
+    residual: null,
+    edgesSupported: null,
+    stress: null,
+    kb: null,
+    widthPath: "primary",
+    holes: null,
+    anMm2: null,
+    axial: null,
+    nStarN: null,
+    kt: null,
+    vStarN: null,
+    mStarNmm: null,
+    msNmm: null,
+    rStarN: null,
+    shearMode: null,
+    fvmMpa: null,
+    fvaMpa: null,
+    dpMm: null,
+    twMm: null,
+    d1Mm: null,
+    webGross: null,
+    stiffening: null,
+    sMm: null,
+    alphaF: null,
+    bfoMm: null,
+    tfMm: null,
+    endPanel: false,
+    interaction: null,
+    afgMm2: null,
+    afnMm2: null,
+    afeMm2: null,
+    dfMm: null,
+    flangeFyMpa: null,
+    flangeFuMpa: null,
+    bearing: null,
+    bbfMm: null,
+    bbMm: null,
+    bsMm: null,
+    bearingTfMm: null,
+    bearingPlace: null,
+    flangesRestrained: null,
+    deriveWidth: false,
+    stiffener: null,
+    arrangement: null,
+    asMm2: null,
+    fysMpa: null,
+    tsMm: null,
+    besMm: null,
+    isMm4: null,
+    stiffenerLe: null,
+    outerStiffened: false,
+    soleTorsion: false,
+    torsionDepthMm: null,
+    torsionTfMm: null,
+    fMemberN: null,
+    longWhere: null,
+    d2Mm: null,
+    asLongMm2: null,
+    isLongMm4: null,
+    openings: null,
+    lwMm: null,
+    openingStiffened: false,
+    plasticWeb: false,
+    webBound: null,
+    appendixI: false,
+    nwN: null,
+    mwNmm: null,
+    rwN: null,
+    vwN: null,
+    modulusMpa: null,
+    fnN: null,
+    fpN: null,
+    mpNmm: null,
+    eccMm: null,
+    endPost: false,
+    endGapMm: null,
+    aepMm2: null,
+    weldKnPerMm: null,
+  }
+}
+
+export function fmt(n: number, digits = 4): string {
+  if (!Number.isFinite(n)) return "—"
+  const abs = Math.abs(n)
+  if (abs !== 0 && (abs >= 1e5 || abs < 1e-3)) return n.toExponential(4)
+  return String(Number(n.toFixed(digits)))
+}
+
+export function kn(n: number): string {
+  return `${fmt(n / 1000, 3)} kN`
+}
+
+const PHI_SOURCE: Record<string, string> = {
+  shear: "Table 3.4 — web in shear, Clauses 5.11 and 5.12, φ = 0.90",
+  bearing: "Table 3.4 — web in bearing, Clause 5.13, φ = 0.90",
+  stiffener: "Table 3.4 — stiffener, Clauses 5.14, 5.15 and 5.16, φ = 0.90",
+  compression: "Table 3.4 — axial compression, Clauses 6.1, 6.2 and 6.3, φ = 0.90. This row is section capacity Ns. Member Nc is not evaluated.",
+  tension: "Table 3.4 — axial tension, Clauses 7.1 and 7.2, φ = 0.90",
+  bending: "Table 3.4 — bending, Clauses 5.1, 5.2, 5.3 and 5.6, φ = 0.90",
+}
+
+export function phiOf(kind: keyof typeof PHI_SOURCE): { phi: number; source: string } {
+  return { phi: 0.9, source: `AS 4100:2020 ${PHI_SOURCE[kind]}` }
+}
+
+export function blankCheck(partial: {
+  id: string
+  group: string
+  title: string
+  clause: string
+  equation: string
+  steps?: string[]
+  result: string
+  note: string
+  status: CheckStatus
+  kind?: CheckKind
+  normative?: boolean
+  nominal?: number | null
+  nominalUnit?: string
+  phi?: number | null
+  phiSource?: string
+  designCapacity?: number | null
+  action?: number | null
+  utilisation?: number | null
+}): Check {
+  return {
+    kind: partial.kind ?? "strength",
+    normative: partial.normative ?? true,
+    steps: partial.steps ?? [],
+    nominal: partial.nominal ?? null,
+    nominalUnit: partial.nominalUnit ?? "",
+    phi: partial.phi ?? null,
+    phiSource: partial.phiSource ?? "",
+    designCapacity: partial.designCapacity ?? null,
+    action: partial.action ?? null,
+    utilisation: partial.utilisation ?? null,
+    ...partial,
+  }
+}
+
+export function blocks(check: Check): boolean {
+  if (!check.normative) return false
+  if (check.kind === "service") return false
+  return check.status === "fail" || check.status === "data-required" || check.status === "not-checked" || check.status === "invalid" || check.status === "out-of-scope"
+}
+
+export function pos(n: number | null): n is number {
+  return n != null && Number.isFinite(n) && n > 0
+}
+
+export function utilisation(action: number, design: number): { ratio: number; status: CheckStatus } {
+  if (!(design > 0) || !Number.isFinite(action)) return { ratio: Number.NaN, status: "invalid" }
+  const ratio = action / design
+  return { ratio, status: ratio <= 1 ? "pass" : "fail" }
+}
+
+
+========================================================================
+FILE src/plate/standards/as4100/shear.ts
+========================================================================
+
+/** Clause 5.11 shear factors. Equations, not a stored copy of Table 5.11.5.2. */
+
+export function shearYield(fyMpa: number, areaMm2: number): number {
+  return 0.6 * fyMpa * areaMm2
+}
+
+export function stockyLimit(fyMpa: number): number {
+  return 82 / Math.sqrt(fyMpa / 250)
+}
+
+/** Unstiffened αv, Clause 5.11.5.1. Not capped; Vb ≤ Vw applies outside. */
+export function alphaVUnstiffened(dpOverTw: number, fyMpa: number): number {
+  return (82 / (dpOverTw * Math.sqrt(fyMpa / 250))) ** 2
+}
+
+/** Stiffened αv, Clause 5.11.5.2, already capped at 1. */
+export function alphaVStiffened(dpOverTw: number, fyMpa: number, sOverDp: number): number {
+  const base = alphaVUnstiffened(dpOverTw, fyMpa)
+  const factor = sOverDp <= 1
+    ? 1 / sOverDp ** 2 + 0.75
+    : 0.75 / sOverDp ** 2 + 1
+  return Math.min(1, base * factor)
+}
+
+export function alphaD(alphaV: number, sOverDp: number, forceOne: boolean): number {
+  if (forceOne) return 1
+  if (!(alphaV > 0)) return Number.NaN
+  return 1 + (1 - alphaV) / (1.15 * alphaV * Math.sqrt(1 + sOverDp ** 2))
+}
+
+/** Clause 5.11.5.2(b). bfo, tf, d1, tw in mm; the ratio is dimensionless. */
+export function alphaFFlange(bfoMm: number, tfMm: number, d1Mm: number, twMm: number): number {
+  const inner = 1 + (40 * bfoMm * tfMm * tfMm) / (d1Mm * d1Mm * twMm)
+  return 1.6 - 0.6 / Math.sqrt(inner)
+}
+
+export function productAlpha(dpOverTwTimesRoot: number, sOverDp: number): number {
+  const fyOver = 1
+  const dpOverTw = dpOverTwTimesRoot
+  const av = sOverDp > 3 ? alphaVUnstiffened(dpOverTw, 250 * fyOver) : alphaVStiffened(dpOverTw, 250, sOverDp)
+  const ad = sOverDp > 3 ? 1 : alphaD(av, sOverDp, false)
+  return av * ad
+}
+
+
+========================================================================
+FILE src/plate/standards/as4100/tables.ts
+========================================================================
+
+import type { Residual } from "./shared.ts"
+
+export type Limits = { ep: number; ey: number; ed: number | null; row: string }
+
+type Stress = "uniform-compression" | "edge-gradient" | "outstand-gradient"
+
+/** Table 5.2 plasticity, yield and deformation limits. ed null means the table cell is an em dash. */
+const TABLE_52: Record<string, [number, number, number | null]> = {
+  "one|uniform-compression|SR": [10, 16, 35],
+  "one|uniform-compression|HR": [9, 16, 35],
+  "one|uniform-compression|LW": [8, 15, 35],
+  "one|uniform-compression|CF": [8, 15, 35],
+  "one|uniform-compression|HW": [8, 14, 35],
+  "one|outstand-gradient|SR": [10, 25, null],
+  "one|outstand-gradient|HR": [9, 25, null],
+  "one|outstand-gradient|LW": [8, 22, null],
+  "one|outstand-gradient|CF": [8, 22, null],
+  "one|outstand-gradient|HW": [8, 22, null],
+  "both|uniform-compression|SR": [30, 45, 90],
+  "both|uniform-compression|HR": [30, 45, 90],
+  "both|uniform-compression|LW": [30, 40, 90],
+  "both|uniform-compression|CF": [30, 40, 90],
+  "both|uniform-compression|HW": [30, 35, 90],
+  "both|edge-gradient|ANY": [82, 115, null],
+}
+
+/** Table 6.2.4 yield slenderness limit for a compression element. No gradient rows exist in this table. */
+const TABLE_624: Record<string, number> = {
+  "one|SR": 16,
+  "one|HR": 16,
+  "one|LW": 15,
+  "one|CF": 15,
+  "one|HW": 14,
+  "both|SR": 45,
+  "both|HR": 45,
+  "both|LW": 40,
+  "both|CF": 40,
+  "both|HW": 35,
+}
+
+export function residualLabel(residual: Residual): string {
+  if (residual === "SR") return "SR — stress relieved"
+  if (residual === "HR") return "HR — hot-rolled or hot-finished"
+  if (residual === "LW") return "LW — lightly welded longitudinally"
+  if (residual === "CF") return "CF — cold-formed"
+  return "HW — heavily welded longitudinally"
+}
+
+export function limits52(edges: "one" | "both", stress: Stress, residual: Residual | null): Limits | null {
+  if (edges === "both" && stress === "edge-gradient") {
+    const row = TABLE_52["both|edge-gradient|ANY"]
+    if (!row) return null
+    return { ep: row[0], ey: row[1], ed: row[2], row: "flat, both edges supported, compression at one edge and tension at the other, residual stresses Any" }
+  }
+  if (stress === "edge-gradient") return null
+  if (!residual) return null
+  const key = `${edges}|${stress}|${residual}`
+  const row = TABLE_52[key]
+  if (!row) return null
+  const edgeText = edges === "one" ? "one longitudinal edge supported (outstand)" : "both longitudinal edges supported"
+  const stressText = stress === "uniform-compression"
+    ? "uniform compression"
+    : "maximum compression at the unsupported edge, zero stress or tension at the supported edge"
+  return { ep: row[0], ey: row[1], ed: row[2], row: `flat, ${edgeText}, ${stressText}, ${residualLabel(residual)}` }
+}
+
+export function lambdaEy624(edges: "one" | "both", residual: Residual): number | null {
+  return TABLE_624[`${edges}|${residual}`] ?? null
+}
+
+/** Clause 5.2.2 and Clause 6.2.3. fy is in MPa. b and t are in the same length unit. */
+export function lambdaE(b: number, t: number, fy: number): number {
+  return (b / t) * Math.sqrt(fy / 250)
+}
+
+export function kbo(edges: "one" | "both"): number {
+  return edges === "both" ? 4 : 0.425
+}
+
+
+========================================================================
+FILE src/plate/stiffeners.ts
+========================================================================
+
+/** Stiffener cross-sections. Second moments are about the plate mid-surface. Not a code rigidity check. */
+
+export const STEEL_DENSITY_KG_M3 = 7850
+
+export type SectionKind = "flat" | "plate" | "angle" | "tee" | "custom"
+
+export type StiffenerInput = {
+  id: string
+  axis: "x" | "y"
+  atMm: number
+  kind: SectionKind
+  /** Outstand height measured from the plate face, mm. */
+  hMm: number
+  twMm: number
+  bfMm: number
+  tfMm: number
+  eMpa: number
+  fyMpa: number
+  customA?: number
+  customI?: number
+  customJ?: number
+  rigid: boolean
+}
+
+export type StiffenerProps = {
+  areaMm2: number
+  iMm4: number
+  jMm4: number
+  eaN: number
+  eiNmm2: number
+  gjNmm2: number
+  centroidFromFaceMm: number
+  note: string
+}
+
+export function newStiffener(partial: Partial<StiffenerInput> & Pick<StiffenerInput, "id" | "axis" | "atMm">): StiffenerInput {
+  return {
+    id: partial.id,
+    axis: partial.axis,
+    atMm: partial.atMm,
+    kind: partial.kind ?? "flat",
+    hMm: partial.hMm ?? 80,
+    twMm: partial.twMm ?? 8,
+    bfMm: partial.bfMm ?? 80,
+    tfMm: partial.tfMm ?? 8,
+    eMpa: partial.eMpa ?? 210000,
+    fyMpa: partial.fyMpa ?? 350,
+    customA: partial.customA,
+    customI: partial.customI,
+    customJ: partial.customJ,
+    rigid: partial.rigid ?? false,
+  }
+}
+
+function torsionRect(length: number, thickness: number): number {
+  const a = Math.max(length, thickness)
+  const b = Math.min(length, thickness)
+  if (!(a > 0) || !(b > 0)) return 0
+  return a * b ** 3 * (1 / 3 - 0.21 * (b / a) * (1 - b ** 4 / (12 * a ** 4)))
+}
+
+function rectAboutZero(z0: number, z1: number, width: number): { area: number; i: number; centroid: number } {
+  const h = z1 - z0
+  const area = width * h
+  const centroid = 0.5 * (z0 + z1)
+  const i = (width * h ** 3) / 12 + area * centroid * centroid
+  return { area, i, centroid }
+}
+
+export function stiffenerProps(input: StiffenerInput, plateTmm: number): StiffenerProps {
+  const fail = (note: string): StiffenerProps => ({
+    areaMm2: 0,
+    iMm4: 0,
+    jMm4: 0,
+    eaN: 0,
+    eiNmm2: 0,
+    gjNmm2: 0,
+    centroidFromFaceMm: 0,
+    note,
+  })
+  if (!(input.eMpa > 0)) return fail("Stiffener E must be positive.")
+  if (input.kind === "custom") {
+    const area = input.customA ?? 0
+    const i = input.customI ?? 0
+    const j = input.customJ ?? 0
+    if (!(area > 0) || !(i > 0) || !(j >= 0)) return fail("Custom stiffener needs A > 0 and I > 0 about the plate mid-surface.")
+    const g = input.eMpa / (2 * (1 + 0.3))
+    return {
+      areaMm2: area,
+      iMm4: i,
+      jMm4: j,
+      eaN: input.eMpa * area,
+      eiNmm2: input.eMpa * i,
+      gjNmm2: g * j,
+      centroidFromFaceMm: 0,
+      note: "Custom A, I and J are used as entered. I is about the plate mid-surface. G = E / 2.6.",
+    }
+  }
+  if (!(input.hMm > 0) || !(input.twMm > 0)) return fail("Stiffener height and thickness must be positive.")
+  const zFace = plateTmm > 0 ? plateTmm / 2 : 0
+  const zTip = zFace + input.hMm
+  let area = 0
+  let moment = 0
+  let i = 0
+  let j = 0
+  const add = (z0: number, z1: number, width: number) => {
+    if (!(width > 0) || !(z1 > z0)) return
+    const piece = rectAboutZero(z0, z1, width)
+    area += piece.area
+    moment += piece.area * piece.centroid
+    i += piece.i
+    j += torsionRect(z1 - z0, width)
+  }
+  if (input.kind === "flat" || input.kind === "plate") {
+    add(zFace, zTip, input.twMm)
+  } else if (input.kind === "angle" || input.kind === "tee") {
+    if (!(input.bfMm > 0) || !(input.tfMm > 0)) return fail("Angle and tee stiffeners need a flange width and thickness.")
+    const zFlange0 = Math.max(zFace, zTip - input.tfMm)
+    add(zFace, zFlange0, input.twMm)
+    add(zFlange0, zTip, input.bfMm)
+  } else {
+    return fail("Unknown stiffener section.")
+  }
+  if (!(area > 0) || !(i > 0)) return fail("Stiffener area or second moment is not positive.")
+  const g = input.eMpa / (2 * (1 + 0.3))
+  const note = input.kind === "flat" || input.kind === "plate"
+    ? "Rectangular outstand. I = ∫ z² dA about the plate mid-surface. J is Saint-Venant torsion, not warping torsion. G uses ν = 0.3."
+    : "Web plus tip flange. The flange width is the full entered width and the web stops at the flange. I is about the plate mid-surface. Warping torsion is not included. G uses ν = 0.3."
+  return {
+    areaMm2: area,
+    iMm4: i,
+    jMm4: j,
+    eaN: input.eMpa * area,
+    eiNmm2: input.eMpa * i,
+    gjNmm2: g * j,
+    centroidFromFaceMm: moment / area - zFace,
+    note,
+  }
+}
+
+export function stiffenerMassKg(areaMm2: number, lengthMm: number): number {
+  if (!(areaMm2 > 0) || !(lengthMm > 0)) return 0
+  return areaMm2 * lengthMm * STEEL_DENSITY_KG_M3 * 1e-9
+}
+
+export function plateMassKg(aMm: number, bMm: number, tMm: number): number {
+  if (!(aMm > 0) || !(bMm > 0) || !(tMm > 0)) return 0
+  return aMm * bMm * tMm * STEEL_DENSITY_KG_M3 * 1e-9
+}
+
+
+========================================================================
+FILE src/plate/subpanels.ts
+========================================================================
+
+import { classicalPlate, type Edges } from "./classical.ts"
+import type { StiffenerInput } from "./stiffeners.ts"
+
+export type PanelGeom = {
+  id: string
+  col: number
+  row: number
+  x0: number
+  x1: number
+  y0: number
+  y1: number
+  aMm: number
+  bMm: number
+  alpha: number
+  sigmaBottom: number
+  sigmaTop: number
+  psi: number
+  tau: number
+  closedForm: boolean
+  sigmaCrMpa: number | null
+  kSigma: number | null
+  m: number | null
+  n: number | null
+  /** Classical value if every edge were simply supported. Not a verified stiffener restraint. */
+  ssEstimateMpa: number | null
+  status: string
+}
+
+function uniqueStations(length: number, values: number[]): number[] {
+  const raw = values.filter((v) => v > length * 1e-4 && v < length * (1 - 1e-4))
+  raw.sort((p, q) => p - q)
+  const out: number[] = []
+  for (const v of raw) {
+    if (out.length === 0 || Math.abs(v - out[out.length - 1]!) > Math.max(0.5, length * 1e-4)) out.push(v)
+  }
+  return out
+}
+
+function sigmaAt(sigma1: number, psi: number, y: number, b: number): number {
+  if (!(b > 0)) return sigma1
+  return sigma1 * (1 - (1 - psi) * (y / b))
+}
+
+export function buildPanels(input: {
+  aMm: number
+  bMm: number
+  tMm: number
+  eMpa: number
+  nu: number
+  fyMpa: number
+  fuMpa: number
+  sigma1Mpa: number
+  psi: number
+  tauMpa: number
+  edges: Edges
+  stiffeners: StiffenerInput[]
+}): PanelGeom[] {
+  const xs = [0, ...uniqueStations(input.aMm, input.stiffeners.filter((s) => s.axis === "y").map((s) => s.atMm)), input.aMm]
+  const ys = [0, ...uniqueStations(input.bMm, input.stiffeners.filter((s) => s.axis === "x").map((s) => s.atMm)), input.bMm]
+  const panels: PanelGeom[] = []
+  let id = 1
+  for (let row = 0; row < ys.length - 1; row++) {
+    for (let col = 0; col < xs.length - 1; col++) {
+      const x0 = xs[col]!
+      const x1 = xs[col + 1]!
+      const y0 = ys[row]!
+      const y1 = ys[row + 1]!
+      const aMm = x1 - x0
+      const bMm = y1 - y0
+      const sigmaBottom = sigmaAt(input.sigma1Mpa, input.psi, y0, input.bMm)
+      const sigmaTop = sigmaAt(input.sigma1Mpa, input.psi, y1, input.bMm)
+      const psi = Math.abs(sigmaBottom) > 1e-9 ? sigmaTop / sigmaBottom : Math.abs(sigmaTop) > 1e-9 ? 0 : 1
+      const touchesStiffener = col > 0 || col < xs.length - 2 || row > 0 || row < ys.length - 2
+      const parentClosed = !touchesStiffener
+        && input.edges.x0 === "ss" && input.edges.x1 === "ss" && input.edges.y0 === "ss" && input.edges.y1 === "ss"
+      const localEdges: Edges = { x0: "ss", x1: "ss", y0: "ss", y1: "ss" }
+      const estimate = aMm > 0 && bMm > 0
+        ? classicalPlate({
+          aMm,
+          bMm,
+          tMm: input.tMm,
+          eMpa: input.eMpa,
+          nu: input.nu,
+          fyMpa: input.fyMpa,
+          fuMpa: input.fuMpa,
+          sigma1Mpa: Math.abs(sigmaBottom) > 1e-9 ? sigmaBottom : sigmaTop,
+          psi,
+          tauMpa: input.tauMpa,
+          edges: localEdges,
+        })
+        : null
+      const closed = parentClosed ? estimate : null
+      panels.push({
+        id: `P${id}`,
+        col,
+        row,
+        x0,
+        x1,
+        y0,
+        y1,
+        aMm,
+        bMm,
+        alpha: bMm > 0 ? aMm / bMm : 0,
+        sigmaBottom,
+        sigmaTop,
+        psi,
+        tau: input.tauMpa,
+        closedForm: Boolean(closed?.ok && closed.kSigma != null),
+        sigmaCrMpa: closed?.ok ? closed.sigmaCrMpa : null,
+        kSigma: closed?.ok ? closed.kSigma : null,
+        m: closed?.ok ? closed.m : null,
+        n: closed?.ok ? closed.n : null,
+        ssEstimateMpa: estimate?.ok ? estimate.sigmaCrMpa : null,
+        status: touchesStiffener
+          ? "GEOMETRIC SUBPANEL IDENTIFIED. STIFFENER DESIGN ADEQUATE: NOT VERIFIED. SUBPANEL EDGE ASSUMED FULLY RESTRAINED: NO. STIFFENER ADEQUACY NOT YET VERIFIED."
+          : parentClosed
+            ? "GEOMETRIC SUBPANEL IDENTIFIED. No stiffener cut. Closed form uses the plate edges as entered, not an assumed stiffener restraint."
+            : "GEOMETRIC SUBPANEL IDENTIFIED. NO CLOSED-FORM SOLUTION — FEM REQUIRED. SUBPANEL EDGE ASSUMED FULLY RESTRAINED: NO.",
+      })
+      id += 1
+    }
+  }
+  return panels
+}
+
+export type ModeClass = {
+  kind: "GLOBAL PANEL MODE" | "LOCAL SUBPANEL MODE" | "MIXED MODE" | "UNSTIFFENED PANEL"
+  panelId: string
+  note: string
+}
+
+/** Kinematic reading of a normalised eigenmode. Not a code classification. */
+export function classifyMode(w: number[], xs: number[], ys: number[], panels: PanelGeom[]): ModeClass {
+  if (w.length !== xs.length * ys.length || panels.length === 0) {
+    return { kind: "UNSTIFFENED PANEL", panelId: "", note: "No eigenmode was returned." }
+  }
+  if (panels.length === 1) {
+    return { kind: "UNSTIFFENED PANEL", panelId: panels[0]!.id, note: "One panel. The mode is the panel mode." }
+  }
+  const energy = panels.map((panel) => {
+    let sum = 0
+    let count = 0
+    let signed = 0
+    for (let iy = 0; iy < ys.length; iy++) {
+      const y = ys[iy]!
+      if (y < panel.y0 - 1e-6 || y > panel.y1 + 1e-6) continue
+      for (let ix = 0; ix < xs.length; ix++) {
+        const x = xs[ix]!
+        if (x < panel.x0 - 1e-6 || x > panel.x1 + 1e-6) continue
+        const value = w[iy * xs.length + ix] ?? 0
+        sum += value * value
+        signed += value
+        count += 1
+      }
+    }
+    return { id: panel.id, sum, mean: count ? signed / count : 0 }
+  })
+  const total = energy.reduce((s, row) => s + row.sum, 0)
+  if (!(total > 0)) return { kind: "MIXED MODE", panelId: "", note: "The eigenmode has no transverse displacement to classify." }
+  const ranked = energy.map((row) => ({ ...row, share: row.sum / total })).sort((p, q) => q.share - p.share)
+  const top = ranked[0]!
+  const second = ranked[1]?.share ?? 0
+  const signChanges = ranked.filter((row) => Math.abs(row.mean) > 1e-4).some((row, index, list) => {
+    const other = list[index + 1]
+    return other ? row.mean * other.mean < 0 : false
+  })
+  if (top.share >= 0.55 && second <= 0.35) {
+    return {
+      kind: "LOCAL SUBPANEL MODE",
+      panelId: top.id,
+      note: `${top.id} holds ${Math.round(top.share * 100)}% of the squared displacement. Adjacent panels are quieter. This is a reading of the eigenmode, not a proof that the stiffener is a simple support.`,
+    }
+  }
+  if (top.share < 0.5 && !signChanges) {
+    return {
+      kind: "GLOBAL PANEL MODE",
+      panelId: "",
+      note: "Displacement energy is spread across the stiffener lines without a single panel dominating.",
+    }
+  }
+  return {
+    kind: "MIXED MODE",
+    panelId: top.id,
+    note: signChanges
+      ? `The eigenmode changes sign between panels. The largest share is ${top.id} at ${Math.round(top.share * 100)}%.`
+      : `No single panel dominates. The largest share is ${top.id} at ${Math.round(top.share * 100)}%.`,
+  }
+}
+
+
+========================================================================
+FILE src/plate/units.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { classicalPlate } from "./classical.ts"
+import { forceToN, lengthToMm, mmToLength, mpaToStress, nToForce, stiffnessToNPerMm, stressToMpa } from "./units.ts"
+
+const SS = { x0: "ss" as const, x1: "ss" as const, y0: "ss" as const, y1: "ss" as const }
+
+test("shared unit engine is identity in mm, MPa and N", () => {
+  assert.equal(lengthToMm(1000, "mm"), 1000)
+  assert.equal(stressToMpa(210000, "MPa"), 210000)
+  assert.equal(forceToN(100000, "N"), 100000)
+  assert.equal(mmToLength(1000, "m"), 1)
+  assert.equal(mpaToStress(210000, "GPa"), 210)
+  assert.equal(nToForce(100000, "kN"), 100)
+})
+
+test("1000 mm, 210000 MPa and 100 kN match 1 m, 210 GPa and 0.1 MN", () => {
+  assert.equal(lengthToMm(1, "m"), 1000)
+  assert.equal(lengthToMm(100, "cm"), 1000)
+  assert.equal(stressToMpa(210, "GPa"), 210000)
+  assert.equal(stressToMpa(2.1e11, "Pa"), 210000)
+  assert.equal(stressToMpa(2.1e8, "kPa"), 210000)
+  assert.equal(forceToN(100, "kN"), 100000)
+  assert.equal(forceToN(0.1, "MN"), 100000)
+  assert.equal(stiffnessToNPerMm(1, "kN", "m"), 1)
+})
+
+test("classical σcr is unchanged after converting to canonical units", () => {
+  const direct = classicalPlate({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, fyMpa: 350, fuMpa: 450,
+    sigma1Mpa: 100, psi: 1, tauMpa: 0, edges: SS,
+  })
+  const converted = classicalPlate({
+    aMm: lengthToMm(1, "m"),
+    bMm: lengthToMm(100, "cm"),
+    tMm: lengthToMm(1, "cm"),
+    eMpa: stressToMpa(210, "GPa"),
+    nu: 0.3,
+    fyMpa: stressToMpa(0.35, "GPa"),
+    fuMpa: stressToMpa(450000, "kPa"),
+    sigma1Mpa: stressToMpa(100, "MPa"),
+    psi: 1,
+    tauMpa: 0,
+    edges: SS,
+  })
+  assert.equal(direct.ok && converted.ok, true)
+  assert.ok(direct.sigmaCrMpa != null && converted.sigmaCrMpa != null)
+  assert.ok(Math.abs(direct.sigmaCrMpa - converted.sigmaCrMpa) / direct.sigmaCrMpa < 1e-12)
+})
+
+
+========================================================================
+FILE src/plate/units.ts
+========================================================================
+
+/** Display units for the plate sheet. Solvers stay in mm, N and MPa.
+ * Factors come from the shared unit engine. Do not hard-code a second scale table.
+ */
+import { convert } from "../units/converter.ts"
+
+export const LENGTH_UNITS = ["mm", "cm", "m"] as const
+export const STRESS_UNITS = ["Pa", "kPa", "MPa", "GPa"] as const
+export const FORCE_UNITS = ["N", "kN", "MN"] as const
+
+export type LengthUnit = (typeof LENGTH_UNITS)[number]
+export type StressUnit = (typeof STRESS_UNITS)[number]
+export type ForceUnit = (typeof FORCE_UNITS)[number]
+
+const LENGTH_ID: Record<LengthUnit, string> = { mm: "mm", cm: "cm", m: "m" }
+const STRESS_ID: Record<StressUnit, string> = {
+  Pa: "stress:Pa",
+  kPa: "stress:kPa",
+  MPa: "stress:MPa",
+  GPa: "stress:GPa",
+}
+const FORCE_ID: Record<ForceUnit, string> = { N: "N", kN: "kN", MN: "MN" }
+
+export function lengthToMm(value: number, unit: LengthUnit): number {
+  return convert(value, LENGTH_ID[unit], "mm")
+}
+
+export function mmToLength(mm: number, unit: LengthUnit): number {
+  return convert(mm, "mm", LENGTH_ID[unit])
+}
+
+export function stressToMpa(value: number, unit: StressUnit): number {
+  return convert(value, STRESS_ID[unit], "stress:MPa")
+}
+
+export function mpaToStress(mpa: number, unit: StressUnit): number {
+  return convert(mpa, "stress:MPa", STRESS_ID[unit])
+}
+
+export function forceToN(value: number, unit: ForceUnit): number {
+  return convert(value, FORCE_ID[unit], "N")
+}
+
+export function nToForce(n: number, unit: ForceUnit): number {
+  return convert(n, "N", FORCE_ID[unit])
+}
+
+/** Rotational spring: force per length. Canonical is N/mm. */
+export function stiffnessToNPerMm(value: number, force: ForceUnit, length: LengthUnit): number {
+  return forceToN(value, force) / lengthToMm(1, length)
+}
+
+export function nPerMmToStiffness(value: number, force: ForceUnit, length: LengthUnit): number {
+  return nToForce(value * lengthToMm(1, length), force)
+}
+
+export function formatEntry(value: number): string {
+  if (!Number.isFinite(value)) return ""
+  const abs = Math.abs(value)
+  if (abs !== 0 && (abs >= 1e7 || abs < 1e-6)) return value.toExponential(8)
+  const rounded = Math.round(value * 1e9) / 1e9
+  return String(rounded)
+}
+
+
+========================================================================
+FILE src/plate/v1-study.ts
+========================================================================
+
+/** One-shot elastic V1 measurements. Not part of the interactive quick suite. */
+
+import { kShear, kShearSeries } from "./classical.ts"
+import { countHalfWaves, solvePlateFem, type FemInput, type FemResult } from "./fem.ts"
+import { modeMac } from "./mac.ts"
+
+const SS = { x0: "ss" as const, x1: "ss" as const, y0: "ss" as const, y1: "ss" as const }
+const steel = { eMpa: 210000, nu: 0.3 }
+
+function kFromTau(tau: number, t: number, b: number): number {
+  const scale = (Math.PI ** 2 * 210000 * (t / b) ** 2) / (12 * (1 - 0.3 * 0.3))
+  return tau / scale
+}
+
+export function shearSeriesTable(alphas = [0.5, 1, 2, 4]): string[] {
+  const orders = [4, 6, 8, 10, 12, 16]
+  const lines: string[] = []
+  for (const alpha of alphas) {
+    let previous: number | null = null
+    for (const order of orders) {
+      const row = kShearSeries(alpha, order)
+      const k = row?.k ?? NaN
+      const change = previous != null && previous !== 0 ? (100 * (k - previous)) / Math.abs(previous) : null
+      lines.push(`series α=${alpha} order=${order} k=${k.toFixed(4)} Δ=${change == null ? "—" : change.toFixed(4) + "%"} fit=${kShear(alpha).toFixed(4)}`)
+      previous = k
+    }
+  }
+  return lines
+}
+
+function base(extra: Partial<FemInput>): FemInput {
+  return {
+    aMm: 1000, bMm: 1000, tMm: 10, ...steel,
+    sigma1Mpa: 0, psi: 1, tauMpa: 0, nx: 8, ny: 8,
+    edges: SS, krNPerRadPerMm: 0, shapes: true, modes: 2,
+    ...extra,
+  }
+}
+
+function grids(alpha: number, shorts: number[]): { nx: number; ny: number }[] {
+  return shorts.map((n) => {
+    if (alpha >= 1) return { ny: n, nx: Math.min(64, Math.max(n, Math.round(n * alpha))) }
+    return { nx: n, ny: Math.min(64, Math.max(n, Math.round(n / alpha))) }
+  })
+}
+
+export function shearFemTable(): string[] {
+  const lines: string[] = []
+  for (const alpha of [0.5, 1, 2, 4]) {
+    const series = kShearSeries(alpha, 16)
+    const fit = kShear(alpha)
+    let previous: FemResult | null = null
+    const shorts = alpha >= 4 ? [8, 12, 16] : [8, 12, 16, 24, 32]
+    for (const grid of grids(alpha, shorts)) {
+      const fem = solvePlateFem(base({
+        aMm: 1000 * alpha, bMm: 1000, tMm: 10, tauMpa: 1, sigma1Mpa: 0, nx: grid.nx, ny: grid.ny,
+      }))
+      const tau = fem.modes[0]?.tauCrMpa ?? NaN
+      const k = kFromTau(tau, 10, 1000)
+      const mac = previous?.ok && fem.ok ? modeMac(previous.modes[0]!.w, previous.xs, previous.ys, fem.modes[0]!.w, fem.xs, fem.ys) : null
+      const prevK = previous?.modes[0]?.tauCrMpa != null ? kFromTau(previous.modes[0]!.tauCrMpa!, 10, 1000) : null
+      const change = prevK != null ? (100 * (k - prevK)) / Math.abs(prevK) : null
+      const vs = series ? (100 * (k - series.k)) / series.k : null
+      lines.push(`shear α=${alpha} ${grid.nx}×${grid.ny} el=${fem.elements} dof=${fem.freeDof} k=${k.toFixed(4)} r=${fem.residual.toExponential(2)} Δ=${change == null ? "—" : change.toFixed(3) + "%"} series=${series?.k.toFixed(4)} vs=${vs == null ? "—" : vs.toFixed(3) + "%"} fit=${fit.toFixed(3)} mac=${mac == null ? "—" : mac.toFixed(4)} waves=${countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "x")}×${countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "y")} ${fem.seconds.toFixed(2)}s`)
+      previous = fem
+    }
+  }
+  return lines
+}
+
+function stiffenerCase(id: string, stiffeners: FemInput["stiffeners"]): string[] {
+  const lines: string[] = [`# ${id}`]
+  let previous: FemResult | null = null
+  for (const n of [8, 12, 16, 24, 32]) {
+    const fem = solvePlateFem(base({
+      sigma1Mpa: 1, nx: n, ny: n, stiffeners,
+    }))
+    const stress = fem.modes[0]?.sigma1CrMpa ?? NaN
+    const mac = previous?.ok && fem.ok ? modeMac(previous.modes[0]!.w, previous.xs, previous.ys, fem.modes[0]!.w, fem.xs, fem.ys) : null
+    const prev = previous?.modes[0]?.sigma1CrMpa
+    const change = prev != null && prev !== 0 ? (100 * (stress - prev)) / Math.abs(prev) : null
+    const hx = countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "x")
+    const hy = countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "y")
+    const why = fem.ok ? "" : ` FAIL ${fem.reason}`
+    lines.push(`${id} ${fem.nx}×${fem.ny} dof=${fem.freeDof} σ=${stress.toFixed(2)} r=${fem.residual.toExponential(2)} Δ=${change == null ? "—" : change.toFixed(3) + "%"} mac=${mac == null ? "—" : mac.toFixed(4)} waves=${hx}×${hy}${why}`)
+    previous = fem
+  }
+  return lines
+}
+
+export function stiffenerTable(): string[] {
+  const beam = (id: string, axis: "x" | "y", at: number, ei: number, gj = 0) => ({ id, axis, atMm: at, eiNmm2: ei, gjNmm2: gj, areaMm2: 0, rigid: false })
+  return [
+    ...stiffenerCase("S01", []),
+    ...stiffenerCase("S02", [beam("L", "x", 500, 1e11)]),
+    ...stiffenerCase("S03", [beam("L1", "x", 1000 / 3, 1e11), beam("L2", "x", 2000 / 3, 1e11)]),
+    ...stiffenerCase("S04", [beam("T", "y", 500, 1e11)]),
+    ...stiffenerCase("S05", [beam("L", "x", 500, 1e11), beam("T", "y", 500, 1e11)]),
+  ]
+}
+
+export function gjTable(): string[] {
+  const lines: string[] = []
+  let baseMode: FemResult | null = null
+  for (const gj of [0, 1e6, 1e8, 1e10, 1e12, 1e14]) {
+    const fem = solvePlateFem(base({
+      sigma1Mpa: 1, nx: 12, ny: 12,
+      stiffeners: [{ id: "L", axis: "x", atMm: 500, eiNmm2: 1e14, gjNmm2: gj, areaMm2: 0, rigid: false }],
+    }))
+    const mac = baseMode?.ok && fem.ok ? modeMac(baseMode.modes[0]!.w, baseMode.xs, baseMode.ys, fem.modes[0]!.w, fem.xs, fem.ys) : null
+    if (gj === 0) baseMode = fem
+    lines.push(`GJ=${gj.toExponential(0)} σ=${(fem.modes[0]?.sigma1CrMpa ?? NaN).toFixed(2)} r=${fem.residual.toExponential(2)} waves=${countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "x")}×${countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "y")} mac0=${mac == null ? "—" : mac.toFixed(4)}`)
+  }
+  return lines
+}
+
+function patchSolve(label: string, input: Partial<FemInput>, meshes: { nx: number; ny: number }[]): string[] {
+  const lines: string[] = [`# ${label}`]
+  let previous: FemResult | null = null
+  for (const grid of meshes) {
+    const fem = solvePlateFem(base({ nx: grid.nx, ny: grid.ny, sigma1Mpa: 0, ...input }))
+    const force = fem.modes[0]?.patchCrN ?? NaN
+    const mac = previous?.ok && fem.ok ? modeMac(previous.modes[0]!.w, previous.xs, previous.ys, fem.modes[0]!.w, fem.xs, fem.ys) : null
+    const prev = previous?.modes[0]?.patchCrN
+    const change = prev != null && prev !== 0 ? (100 * (force - prev)) / Math.abs(prev) : null
+    const hx = countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "x")
+    const hy = countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "y")
+    const sums = fem.prestressNote.match(/ΣFx [\d.eE+-]+ N\. ΣFy [\d.eE+-]+ N\. ΣMz [\d.eE+-]+ N·mm\./)?.[0] ?? ""
+    const imb = fem.prestressNote.match(/Force imbalance [\d.]+%/)?.[0] ?? ""
+    const why = fem.ok ? "" : ` FAIL ${fem.reason}`
+    lines.push(`${label} ${fem.nx}×${fem.ny} dof=${fem.freeDof} Fcr=${force.toFixed(0)} r=${fem.residual.toExponential(2)} Δ=${change == null ? "—" : change.toFixed(3) + "%"} mac=${mac == null ? "—" : mac.toFixed(4)} waves=${hx}×${hy} ${imb} ${sums}${why}`)
+    previous = fem
+  }
+  return lines
+}
+
+export function patchTable(): string[] {
+  const meshes = [8, 12, 16, 24, 32].map((n) => ({ nx: n, ny: n }))
+  const stiff = [{ id: "T", axis: "y" as const, atMm: 500, eiNmm2: 1e11, gjNmm2: 0, areaMm2: 0, rigid: false }]
+  return [
+    ...patchSolve("P01", { patchLoad: { edge: "y1", atMm: 500, lengthMm: 200, forceN: 10000 } }, meshes),
+    ...patchSolve("P02", { patchLoad: { edge: "y1", atMm: 500, lengthMm: 500, forceN: 10000 } }, meshes),
+    ...patchSolve("P03", { patchLoad: { edge: "y1", atMm: 500, lengthMm: 1000, forceN: 10000 } }, meshes),
+    ...patchSolve("P04", { patchLoad: { edge: "y1", atMm: 250, lengthMm: 200, forceN: 10000 } }, meshes),
+    ...patchSolve("P05", { patchLoad: { edge: "y1", atMm: 500, lengthMm: 200, forceN: 10000 }, stiffeners: stiff }, meshes),
+    ...patchSolve("P06", { patchLoad: { edge: "y1", atMm: 200, lengthMm: 200, forceN: 10000 }, stiffeners: stiff }, meshes),
+  ]
+}
+
+export function shearAlpha4Fine(): string[] {
+  const series = kShearSeries(4, 16)
+  const fem = solvePlateFem(base({
+    aMm: 4000, bMm: 1000, tMm: 10, tauMpa: 1, sigma1Mpa: 0, nx: 80, ny: 20,
+  }))
+  const tau = fem.modes[0]?.tauCrMpa ?? NaN
+  const k = kFromTau(tau, 10, 1000)
+  const vs = series ? (100 * (k - series.k)) / series.k : null
+  return [`shear α=4 80×20 el=${fem.elements} dof=${fem.freeDof} k=${k.toFixed(4)} r=${fem.residual.toExponential(2)} series=${series?.k.toFixed(4)} vs=${vs == null ? "—" : vs.toFixed(3) + "%"} waves=${countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "x")}×${countHalfWaves(fem.modes[0]?.w ?? [], fem.xs, fem.ys, "y")} ${fem.seconds.toFixed(2)}s ${fem.ok ? "" : fem.reason}`]
+}
+
+const part = process.argv[2] ?? "series"
+const started = Date.now()
+const lines = part === "series" ? shearSeriesTable()
+  : part === "shear" ? shearFemTable()
+  : part === "shear4" ? shearAlpha4Fine()
+  : part === "stiff" ? stiffenerTable()
+  : part === "gj" ? gjTable()
+  : part === "patch" ? patchTable()
+  : []
+for (const line of lines) console.log(line)
+console.log(`done ${part} ${(Date.now() - started) / 1000}s`)
+
+
+========================================================================
+FILE src/plate/v1.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { kShearSeries } from "./classical.ts"
+import { designChecks } from "./codes/dispatch.ts"
+import { solvePlateFem } from "./fem.ts"
+import { modeMac } from "./mac.ts"
+import { ELASTIC_ENGINE } from "./version.ts"
+
+const SS = { x0: "ss" as const, x1: "ss" as const, y0: "ss" as const, y1: "ss" as const }
+
+test("shear series from order 12 to 16 has settled", () => {
+  for (const alpha of [0.5, 1, 2, 4]) {
+    const coarse = kShearSeries(alpha, 12)
+    const fine = kShearSeries(alpha, 16)
+    assert.ok(coarse && fine)
+    const change = Math.abs(fine.k - coarse.k) / coarse.k
+    assert.ok(change < 0.001, `α=${alpha} Δ=${change} k16=${fine.k}`)
+  }
+  const square = kShearSeries(1, 16)
+  assert.ok(square && square.k > 9.3 && square.k < 9.35, String(square?.k))
+})
+
+test("production bending modes stay positive and the 60×21 residual stays tiny", () => {
+  const fem = solvePlateFem({
+    aMm: 5000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3,
+    sigma1Mpa: 100, psi: -1, tauMpa: 0, nx: 60, ny: 21,
+    edges: SS, krNPerRadPerMm: 0, modes: 3, shapes: true,
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  assert.ok(fem.modes.every((mode) => mode.lambda > 0))
+  assert.ok(fem.spectrum.some((row) => row.lambda < 0))
+  const stress = fem.modes[0]?.sigma1CrMpa ?? 0
+  assert.ok(Math.abs(stress - 457.09) / 457.09 < 0.002, String(stress))
+  assert.ok(fem.residual < 1e-8, String(fem.residual))
+  assert.match(fem.note, /IQ-PLB-E1\.0/)
+  assert.match(fem.note, /positive eigenvalues only/i)
+  const mac = modeMac(fem.modes[0]!.w, fem.xs, fem.ys, fem.modes[0]!.w, fem.xs, fem.ys)
+  const flipped = fem.modes[0]!.w.map((value) => -value)
+  assert.ok(mac > 0.999)
+  assert.ok(modeMac(flipped, fem.xs, fem.ys, fem.modes[0]!.w, fem.xs, fem.ys) > 0.999)
+})
+
+test("design methods do not invent a resistance", () => {
+  const input = { aMm: 1000, bMm: 500, tMm: 10, fyMpa: 350, edgesSimplySupported: true, stiffenerCount: 1, hasPatch: true }
+  for (const method of ["none", "as4100", "en1993", "as5224"] as const) {
+    const rows = designChecks(method, input)
+    assert.ok(rows.some((row) => row.id === "elastic-fence"))
+    assert.ok(rows.every((row) => row.result !== "PASS" && !/^\d+(\.\d+)?\s*kN/.test(row.result)))
+  }
+  assert.equal(ELASTIC_ENGINE.id, "IQ-PLB-E1.0")
+})
+
+
+========================================================================
+FILE src/plate/version.ts
+========================================================================
+
+/** Frozen elastic plate engine. Design-code work must not change this without re-running the elastic suite. */
+
+export const ELASTIC_ENGINE = {
+  id: "IQ-PLB-E1.0",
+  date: "2026-10-07",
+  solver: "Reorthogonalised Lanczos on L⁻¹ Kg L⁻ᵀ, then a Rayleigh quotient. Positive λ only in the production modes.",
+  element: "Mindlin bilinear quad. 2×2 bending and geometric stiffness, 1-point shear, ks = 5/6.",
+  stiffener: "Euler–Bernoulli Hermitian beam on EI and GJ. Beam Kg uses N = σA. Edge lines are not assembled.",
+  patch: "Bilinear plane-stress quad, 2×2. Opposite edge normally fixed. λ multiplies the recovered field.",
+  suite: "V01–V20 quick, D01–D17 full, shear series orders 4–16, proportioned shear meshes through 32 and α=4 at 80×20, S01–S05 and P01–P06 through 32 with MAC.",
+  limitations: [
+    "Linear eigenvalue only. Not GMNIA and not a code resistance.",
+    "Mindlin shear makes a thick plate softer than Kirchhoff. The gap is reported, not tuned away.",
+    "Navier shear series is a Kirchhoff energy upper bound. The Timoshenko kτ fit is separate.",
+    "A rigid beam shares one rotation. That is not two independent simple supports.",
+    "Very large GJ can switch the governing mode. That plateau is not a closed-form subpanel.",
+    "Structured quad mesh only. No skewed-element distortion test.",
+    "Out-of-plane eccentricity, point forces and non-uniform patch distributions are not implemented.",
+    "α = 4 shear and the off-centre patch are still moving on the finest mesh run here.",
+  ],
+} as const
+
+export function engineLine(): string {
+  return `ELASTIC ENGINE ${ELASTIC_ENGINE.id} (${ELASTIC_ENGINE.date}). ${ELASTIC_ENGINE.solver}`
+}
+
+
+========================================================================
+FILE src/bolts/areas.ts
+========================================================================
+
+import { threadProfile, type ThreadProfile } from "./threadGeometry.ts"
+
+export type AreaSet = ThreadProfile & {
+  /** Shear area used when the plane passes through the unthreaded shank. */
+  shearShank: number
+  /** Shear area used by the implemented AS 4100 method when the plane cuts the thread. */
+  shearThread: number
+}
+
+export function areas(d: number, P: number): AreaSet {
+  const profile = threadProfile(d, P)
+  return {
+    ...profile,
+    shearShank: profile.Ao,
+    shearThread: profile.As,
+  }
+}
+
+export const AREA_NOTE =
+  "Shank shear uses the nominal area Ao = πd²/4. Thread shear in the AS 4100 check uses tensile stress area As, matching IQ-CAL-002. The basic minor area Ar is shown as geometry and is not substituted for As. Some readings of AS 4100 use a core area instead — confirm the edition you are designing to."
+
+
+========================================================================
+FILE src/bolts/bolts.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import test from "node:test"
+import { areas } from "./areas.ts"
+import { clearanceHoles } from "./clearance.ts"
+import { classBand } from "./materials.ts"
+import { PIPE_THREADS } from "./pipeThreads.ts"
+import { tapDrill } from "./tap.ts"
+import { threadProfile } from "./threadGeometry.ts"
+import { boltTorque } from "./torque.ts"
+import { boltCapacity, lapFactor } from "./capacities.ts"
+import { buildSheet } from "./model.ts"
+import { metricSizesFor, standardById } from "./database.ts"
+import { parseBoltQuery } from "./search.ts"
+
+test("M12 coarse tensile stress area is about 84.3 mm²", () => {
+  const a = areas(12, 1.75)
+  assert.ok(Math.abs(a.As - 84.3) < 0.15, `As ${a.As}`)
+})
+
+test("M20 and M24 coarse areas", () => {
+  assert.ok(Math.abs(areas(20, 2.5).As - 245) < 0.6)
+  assert.ok(Math.abs(areas(24, 3).As - 353) < 0.8)
+})
+
+test("M12 class 4.6 tension matches 0.80 fu As", () => {
+  const a = areas(12, 1.75)
+  const cap = boltCapacity({
+    dMm: 12,
+    pitchMm: 1.75,
+    classId: "4.6",
+    allowDesign: true,
+    nn: 1,
+    nx: 0,
+    ljMm: null,
+    nStar_kN: null,
+    vStar_kN: null,
+    tpMm: null,
+    fupMPa: null,
+    aeMm: null,
+  })
+  assert.equal(cap.ok, true)
+  if (!cap.ok) return
+  const expectKn = (0.8 * a.As * 400) / 1000
+  assert.ok(Math.abs(cap.phiNtf_kN - expectKn) < 1e-9)
+  assert.ok(Math.abs(cap.phiNtf_kN - 27) < 0.15)
+})
+
+test("8.8 above 16 mm uses fu 830", () => {
+  const cap = boltCapacity({
+    dMm: 20,
+    pitchMm: 2.5,
+    classId: "8.8",
+    allowDesign: true,
+    nn: 1,
+    nx: 0,
+    ljMm: null,
+    nStar_kN: 50,
+    vStar_kN: 40,
+    tpMm: null,
+    fupMPa: null,
+    aeMm: null,
+  })
+  assert.equal(cap.ok, true)
+  if (!cap.ok) return
+  assert.equal(cap.fu, 830)
+  assert.ok(cap.utilInteract != null && cap.utilInteract > 0)
+})
+
+test("M12 8.8 uses fu 800", () => {
+  const cap = boltCapacity({
+    dMm: 12,
+    pitchMm: 1.75,
+    classId: "8.8",
+    allowDesign: true,
+    nn: 0,
+    nx: 1,
+    ljMm: null,
+    nStar_kN: null,
+    vStar_kN: null,
+    tpMm: null,
+    fupMPa: null,
+    aeMm: null,
+  })
+  assert.equal(cap.ok, true)
+  if (!cap.ok) return
+  assert.equal(cap.fu, 800)
+  assert.equal(cap.krd, 1)
+})
+
+test("12.9 is outside the AS 4100 check", () => {
+  const cap = boltCapacity({
+    dMm: 20,
+    pitchMm: 2.5,
+    classId: "12.9",
+    allowDesign: true,
+    nn: 1,
+    nx: 0,
+    ljMm: null,
+    nStar_kN: null,
+    vStar_kN: null,
+    tpMm: null,
+    fupMPa: null,
+    aeMm: null,
+  })
+  assert.equal(cap.ok, false)
+})
+
+test("lap factor", () => {
+  assert.equal(lapFactor(0), 1)
+  assert.equal(lapFactor(300), 1)
+  assert.ok(Math.abs(lapFactor(800) - 0.875) < 1e-12)
+  assert.equal(lapFactor(1300), 0.75)
+  assert.equal(lapFactor(2000), 0.75)
+})
+
+test("pitch must be positive", () => {
+  assert.throws(() => areas(20, 0), /Pitch/)
+})
+
+test("search understands engineering notation", () => {
+  const hit = parseBoltQuery("AS 1252 M24 8.8")
+  assert.equal(hit.matched, true)
+  assert.equal(hit.sizeLabel, "M24")
+  assert.equal(hit.standardId, "as1252")
+  assert.equal(hit.classId, "8.8")
+  const fine = parseBoltQuery("M20 fine")
+  assert.equal(fine.pitchMm, 2)
+  const inch = parseBoltQuery("3/4-10 UNC")
+  assert.equal(inch.matched, true)
+  assert.equal(inch.sizeLabel, "3/4")
+  assert.equal(inch.series, "unc")
+})
+
+test("AS 1110 and AS 1111 are separate bolt standards", () => {
+  const precision = parseBoltQuery("AS 1110 M20 8.8")
+  assert.equal(precision.standardId, "as1110")
+  assert.equal(precision.sizeLabel, "M20")
+  assert.equal(precision.classId, "8.8")
+  assert.notEqual(precision.focus, "areas")
+  const commercial = parseBoltQuery("AS 1111 M16 4.6")
+  assert.equal(commercial.standardId, "as1111")
+  assert.equal(commercial.classId, "4.6")
+  const a = standardById("as1110")
+  const b = standardById("as1111")
+  assert.ok(a && b)
+  const precisionD = metricSizesFor(a).map((size) => size.d)
+  const commercialD = metricSizesFor(b).map((size) => size.d)
+  assert.ok(precisionD.includes(3) && precisionD.includes(64) && !precisionD.includes(68))
+  assert.ok(!commercialD.includes(3) && commercialD.includes(5) && commercialD.includes(64) && !commercialD.includes(72))
+})
+
+test("sheet fails closed on a bad number", () => {
+  const sheet = buildSheet({
+    standardId: "iso-metric",
+    sizeLabel: "M20",
+    pitchMm: 2.5,
+    classId: "8.8",
+    lengthMm: "",
+    threadedMm: "",
+    nn: "1",
+    nx: "0",
+    lj: "",
+    nStar: "nope",
+    vStar: "",
+    tp: "",
+    fup: "",
+    ae: "",
+    qty: "1",
+  })
+  assert.match(sheet.error ?? "", /N\*/)
+})
+
+test("M20 ISO 273 clearance is 21 / 22 / 24", () => {
+  const holes = clearanceHoles(20)
+  assert.deepEqual(holes && { fine: holes.fine, medium: holes.medium, coarse: holes.coarse }, { fine: 21, medium: 22, coarse: 24 })
+  assert.equal(clearanceHoles(100), null)
+})
+
+test("100 percent tap drill is the basic minor diameter", () => {
+  const profile = threadProfile(20, 2.5)
+  const drill = tapDrill(20, 2.5, 100)
+  assert.ok(Math.abs(drill.drillMm - profile.d1) < 1e-9)
+  assert.ok(Math.abs(drill.shopEstimateMm - 17.5) < 1e-9)
+})
+
+test("nut factor torque round-trips", () => {
+  const profile = threadProfile(20, 2.5)
+  const forward = boltTorque({
+    dMm: 20, pitchMm: 2.5, d2Mm: profile.d2, asMm2: profile.As, basisMPa: 600, basisName: "Sp",
+    percent: null, manualKn: 100, k: 0.2, torqueNm: null, muThread: null, muBearing: null, bearingOdMm: null, bearingIdMm: null,
+  })
+  assert.equal(forward.ok, true)
+  if (!forward.ok) return
+  assert.ok(Math.abs((forward.torqueFromPreloadNm ?? 0) - 400) < 1e-6)
+  const back = boltTorque({
+    dMm: 20, pitchMm: 2.5, d2Mm: profile.d2, asMm2: profile.As, basisMPa: 600, basisName: "Sp",
+    percent: null, manualKn: null, k: 0.2, torqueNm: 400, muThread: null, muBearing: null, bearingOdMm: null, bearingIdMm: null,
+  })
+  assert.equal(back.ok, true)
+  if (!back.ok) return
+  assert.ok(Math.abs((back.fromTorqueKn ?? 0) - 100) < 1e-6)
+})
+
+test("advanced torque is the sum of thread and bearing", () => {
+  const profile = threadProfile(20, 2.5)
+  const result = boltTorque({
+    dMm: 20, pitchMm: 2.5, d2Mm: profile.d2, asMm2: profile.As, basisMPa: 600, basisName: "Sp",
+    percent: 70, manualKn: null, k: null, torqueNm: null, muThread: 0.12, muBearing: 0.14, bearingOdMm: 37, bearingIdMm: 21,
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.ok(result.threadNm != null && result.bearingNm != null && result.advancedNm != null)
+  assert.ok(Math.abs((result.threadNm + result.bearingNm) - result.advancedNm) < 1e-9)
+  assert.ok((result.kFromAdvanced ?? 0) > 0)
+})
+
+test("NPT and BSPT are not the same 1/2 thread", () => {
+  const npt = PIPE_THREADS.find((item) => item.id === "NPT-1/2")
+  const bspt = PIPE_THREADS.find((item) => item.id === "BSPT-1/2")
+  const bspp = PIPE_THREADS.find((item) => item.id === "BSPP-1/2")
+  assert.equal(npt?.angleDeg, 60)
+  assert.equal(bspt?.angleDeg, 55)
+  assert.equal(bspp?.tapered, false)
+  assert.notEqual(npt?.tpi, PIPE_THREADS.find((item) => item.id === "BSPT-1/8")?.tpi)
+})
+
+test("stainless classes are not carbon-steel property classes", () => {
+  assert.equal(classBand("A2-70", 16), null)
+  assert.equal(classBand("A4-80", 12), null)
+})
+
+
+
+========================================================================
+FILE src/bolts/capacities.ts
+========================================================================
+
+import { areas } from "./areas.ts"
+import { classBand } from "./materials.ts"
+import { parseStrictNumber } from "../reference/format.ts"
+
+export type Step = {
+  id: string
+  label: string
+  equation: string
+  substitution: string
+  result: string
+  clause: string
+}
+
+export type CapacityOk = {
+  ok: true
+  steps: Step[]
+  phi: number
+  fu: number
+  fy: number
+  sp: number
+  kr: number
+  krd: number
+  phiNtf_kN: number
+  phiVf_kN: number
+  phiVb_kN: number | null
+  utilN: number | null
+  utilV: number | null
+  utilPly: number | null
+  utilInteract: number | null
+  governing: string
+}
+
+export type CapacityFail = { ok: false; reason: string }
+
+const AS4100_CLASSES = new Set(["4.6", "8.8", "10.9"])
+
+/** kr = min(1, max(0.75, 1.075 − lj/4000)), lj in mm. Commonly published AS 4100 lap reduction. */
+export function lapFactor(ljMm: number): number {
+  if (!Number.isFinite(ljMm) || ljMm < 0) throw new Error("Lap length lj cannot be negative.")
+  return Math.min(1, Math.max(0.75, 1.075 - ljMm / 4000))
+}
+
+export type CapacityInput = {
+  dMm: number
+  pitchMm: number
+  classId: string
+  allowDesign: boolean
+  nn: number
+  nx: number
+  ljMm: number | null
+  nStar_kN: number | null
+  vStar_kN: number | null
+  tpMm: number | null
+  fupMPa: number | null
+  aeMm: number | null
+}
+
+function count(n: number, label: string): number {
+  if (!Number.isInteger(n) || n < 0 || n > 6) {
+    throw new Error(`${label} must be an integer from 0 to 6.`)
+  }
+  return n
+}
+
+export function boltCapacity(input: CapacityInput): CapacityOk | CapacityFail {
+  if (!input.allowDesign) {
+    return { ok: false, reason: "Outside implemented standard scope — no design result returned." }
+  }
+  if (!AS4100_CLASSES.has(input.classId)) {
+    return { ok: false, reason: "Outside implemented AS 4100 scope — no design result returned." }
+  }
+  let nn: number
+  let nx: number
+  try {
+    nn = count(input.nn, "Threaded shear planes nn")
+    nx = count(input.nx, "Shank shear planes nx")
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "Invalid shear planes." }
+  }
+  const band = classBand(input.classId, input.dMm)
+  if (!band) {
+    return { ok: false, reason: "This combination is not contained in the current verified dataset." }
+  }
+  let profile
+  try {
+    profile = areas(input.dMm, input.pitchMm)
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "Invalid geometry." }
+  }
+  const kr = input.ljMm == null ? 1 : lapFactor(input.ljMm)
+  const krd = input.classId === "10.9" && nn > 0 ? 0.83 : 1
+  const phi = 0.8
+  const Ntf_N = profile.As * band.fu
+  const phiNtf_kN = (phi * Ntf_N) / 1000
+  const Vf_N = 0.62 * band.fu * krd * kr * (nn * profile.As + nx * profile.Ao)
+  const phiVf_kN = (phi * Vf_N) / 1000
+
+  const steps: Step[] = [
+    {
+      id: "fu",
+      label: "fuf",
+      equation: "fuf from the ISO 898-1 nominal minimum for this class and diameter",
+      substitution: `class ${input.classId}, d = ${input.dMm} mm`,
+      result: `${band.fu} MPa`,
+      clause: "AS 4100 takes fuf from the bolt standard. fy and proof stress are not used here.",
+    },
+    {
+      id: "as",
+      label: "As",
+      equation: "As = π/4 ((d2 + d3)/2)²",
+      substitution: `d = ${input.dMm} mm, P = ${input.pitchMm} mm`,
+      result: `${profile.As.toFixed(2)} mm²`,
+      clause: "Tensile stress area, calculated",
+    },
+    {
+      id: "ntf",
+      label: "φNtf",
+      equation: "φNtf = φ fu As",
+      substitution: `0.80 × ${band.fu} × ${profile.As.toFixed(2)} / 1000`,
+      result: `${phiNtf_kN.toFixed(3)} kN`,
+      clause: "AS 4100 bolt in tension. φ = 0.80.",
+    },
+    {
+      id: "kr",
+      label: "kr",
+      equation: "kr = min(1.0, max(0.75, 1.075 − lj/4000))",
+      substitution: input.ljMm == null ? "lj not entered — kr taken as 1.0" : `lj = ${input.ljMm} mm`,
+      result: kr.toFixed(3),
+      clause: "AS 4100 lap-length reduction, commonly published form. Confirm the clause.",
+    },
+    {
+      id: "krd",
+      label: "krd",
+      equation: "krd = 0.83 for 10.9 with threads in a shear plane, otherwise 1.0",
+      substitution: `class ${input.classId}, nn = ${nn}`,
+      result: krd.toFixed(2),
+      clause: "Implemented for 10.9 only. Not taken from another standard's factor set.",
+    },
+    {
+      id: "vf",
+      label: "φVf",
+      equation: "φVf = φ × 0.62 × fu × krd × kr × (nn As + nx Ao)",
+      substitution: `0.80 × 0.62 × ${band.fu} × ${krd} × ${kr.toFixed(3)} × (${nn} × ${profile.As.toFixed(2)} + ${nx} × ${profile.Ao.toFixed(2)}) / 1000`,
+      result: `${phiVf_kN.toFixed(3)} kN`,
+      clause: "AS 4100 bolt in shear as implemented. Thread plane uses As, shank plane uses Ao.",
+    },
+  ]
+
+  let phiVb_kN: number | null = null
+  const plyTouched = input.tpMm != null || input.fupMPa != null || input.aeMm != null
+  if (plyTouched && (input.tpMm == null || input.fupMPa == null)) {
+    steps.push({
+      id: "ply",
+      label: "φVb",
+      equation: "φVb = φp min(3.2 df tp fup, ae tp fup)",
+      substitution: "tp and fup are both required",
+      result: "not returned",
+      clause: "Ply bearing inputs are incomplete — no bearing result returned.",
+    })
+  } else if (input.tpMm != null && input.fupMPa != null) {
+    if (!(input.tpMm > 0) || !(input.fupMPa > 0)) {
+      return { ok: false, reason: "Ply thickness and fup must be greater than zero." }
+    }
+    const crush_N = 3.2 * input.dMm * input.tpMm * input.fupMPa
+    let govern_N = crush_N
+    let sub = `crush 3.2 × ${input.dMm} × ${input.tpMm} × ${input.fupMPa}`
+    if (input.aeMm != null) {
+      if (!(input.aeMm > 0)) return { ok: false, reason: "ae must be greater than zero." }
+      const tear_N = input.aeMm * input.tpMm * input.fupMPa
+      govern_N = Math.min(crush_N, tear_N)
+      sub += `; tear-out ${input.aeMm} × ${input.tpMm} × ${input.fupMPa}`
+    }
+    phiVb_kN = (0.9 * govern_N) / 1000
+    steps.push({
+      id: "ply",
+      label: "φVb",
+      equation: "φp = 0.90; Vb = min(3.2 df tp fup, ae tp fup)",
+      substitution: sub + (input.aeMm == null ? "; ae not entered — tear-out not checked" : ""),
+      result: `${phiVb_kN.toFixed(3)} kN`,
+      clause: "AS 4100 ply bearing. ae is the term in ae tp fup as your edition defines it. φp is not the bolt factor.",
+    })
+  }
+
+  const utilN = input.nStar_kN == null ? null : input.nStar_kN / phiNtf_kN
+  const utilV = input.vStar_kN == null || phiVf_kN === 0 ? null : input.vStar_kN / phiVf_kN
+  const utilPly = input.vStar_kN == null || phiVb_kN == null || phiVb_kN === 0 ? null : input.vStar_kN / phiVb_kN
+  let utilInteract: number | null = null
+  if (input.nStar_kN != null && input.vStar_kN != null && phiNtf_kN > 0 && phiVf_kN > 0) {
+    utilInteract = (input.nStar_kN / phiNtf_kN) ** 2 + (input.vStar_kN / phiVf_kN) ** 2
+    steps.push({
+      id: "interact",
+      label: "η",
+      equation: "(N* / φNtf)² + (V* / φVf)²",
+      substitution: `(${input.nStar_kN} / ${phiNtf_kN.toFixed(3)})² + (${input.vStar_kN} / ${phiVf_kN.toFixed(3)})²`,
+      result: utilInteract.toFixed(3),
+      clause: "AS 4100 bearing-type shear plus tension interaction. TF slip is not this check.",
+    })
+  }
+
+  const candidates: { name: string; value: number }[] = []
+  if (utilN != null) candidates.push({ name: "tension", value: utilN })
+  if (utilV != null) candidates.push({ name: "bolt shear", value: utilV })
+  if (utilPly != null) candidates.push({ name: "ply bearing", value: utilPly })
+  if (utilInteract != null) candidates.push({ name: "interaction", value: utilInteract })
+  const governing =
+    candidates.length === 0
+      ? "No applied action — capacities only."
+      : candidates.reduce((a, b) => (b.value > a.value ? b : a)).name
+
+  return {
+    ok: true,
+    steps,
+    phi,
+    fu: band.fu,
+    fy: band.fy,
+    sp: band.sp,
+    kr,
+    krd,
+    phiNtf_kN,
+    phiVf_kN,
+    phiVb_kN,
+    utilN,
+    utilV,
+    utilPly,
+    utilInteract,
+    governing,
+  }
+}
+
+export function optionalNumber(raw: string): number | null {
+  if (!raw.trim()) return null
+  return parseStrictNumber(raw)
+}

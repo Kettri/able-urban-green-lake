@@ -1,0 +1,3126 @@
+IQ-CAL-PLB WHOLE APP — PART 1 OF 6
+Plain text. Read this file directly. Do not unzip, download, or browse.
+This pack is the engineering website: plate buckling, bolts, units, and the pages that show them.
+Elastic plate engine IQ-PLB-E1.0. AS 4100 plate/web subset IQ-PLB-AS4100-D1.0.
+Not included: node_modules, package-lock, the copyrighted standard PDF, and the Grok preview-host login code.
+
+
+========================================================================
+FILE package.json
+========================================================================
+
+{
+  "name": "app-builder-workspace",
+  "private": true,
+  "sideEffects": false,
+  "type": "module",
+  "overrides": {
+    "nf3": "0.3.17"
+  },
+  "scripts": {
+    "dev": "node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 8080",
+    "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate",
+    "db:migrate": "node scripts/migrate.mjs",
+    "build:dev": "node scripts/with-app-env.mjs vite build --mode development",
+    "preview": "node scripts/with-app-env.mjs vite preview",
+    "preview:restart": "node scripts/preview.mjs restart",
+    "preview:stop": "node scripts/preview.mjs stop",
+    "typecheck": "tsc --noEmit",
+    "check:auth": "node scripts/check-auth-invariant.mjs",
+    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "@hookform/resolvers": "^5.7.0",
+    "@radix-ui/react-accordion": "^1.2.12",
+    "@radix-ui/react-alert-dialog": "^1.1.15",
+    "@radix-ui/react-avatar": "^1.1.11",
+    "@radix-ui/react-checkbox": "^1.3.3",
+    "@radix-ui/react-collapsible": "^1.1.12",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-popover": "^1.1.15",
+    "@radix-ui/react-progress": "^1.1.8",
+    "@radix-ui/react-radio-group": "^1.3.8",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-separator": "^1.1.8",
+    "@radix-ui/react-slider": "^1.3.6",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-switch": "^1.2.6",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@radix-ui/react-toggle": "^1.1.10",
+    "@radix-ui/react-toggle-group": "^1.1.11",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "@tailwindcss/vite": "^4.3.0",
+    "@tanstack/react-query": "^5.101.0",
+    "@tanstack/react-router": "^1.170.0",
+    "@tanstack/react-start": "^1.168.60",
+    "@tanstack/react-table": "^8.21.0",
+    "@tanstack/router-plugin": "^1.168.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "better-auth": "~1.6.30",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "date-fns": "^4.0.0",
+    "jose": "6.2.9",
+    "kysely": "^0.28.5",
+    "lightningcss": "^1.28.0",
+    "lucide-react": "^0.510.0",
+    "nitro": "3.0.260610-beta",
+    "pg": "^8.16.3",
+    "react": "^19.2.0",
+    "react-day-picker": "^9.14.0",
+    "react-dom": "^19.2.0",
+    "react-hook-form": "^7.54.0",
+    "react-resizable-panels": "^4.6.5",
+    "recharts": "^2.13.0",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.3.0",
+    "tw-animate-css": "^1.3.4",
+    "typescript": "^5.7.0",
+    "vaul": "^1.1.2",
+    "vite": "^8.2.0",
+    "zod": "^4.4.0",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "@types/node": "^22.16.5",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "eslint": "^9.20.0",
+    "eslint-config-prettier": "^10.1.1",
+    "eslint-plugin-prettier": "^5.2.6",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^15.15.0",
+    "playwright": "^1.62.0",
+    "prettier": "^3.4.0",
+    "typescript-eslint": "^8.56.1"
+  }
+}
+
+
+========================================================================
+FILE tsconfig.json
+========================================================================
+
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    // `src/lib/db.ts` imports scripts/migration-plan.mjs; checkJs types the
+    // implementation itself instead of a hand-written declaration beside it.
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "types": [
+      "vite/client",
+      "node"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    },
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src",
+    "server"
+  ]
+}
+
+
+========================================================================
+FILE vite.config.ts
+========================================================================
+
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import type { Plugin } from "vite";
+import { defineConfig } from "vite";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+import viteReact from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import { nitro } from "nitro/vite";
+// @ts-expect-error JS plugin alongside the TS vite config
+import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
+// @ts-expect-error JS plugin alongside the TS vite config
+import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
+import { isMigrationFile } from "./scripts/migration-plan.mjs";
+
+/** The files `src/lib/db.ts` globs — same directory, same non-recursive scope. */
+function hasGlobbedMigrations(root: string): boolean {
+  try {
+    return readdirSync(join(root, "migrations")).some(isMigrationFile);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Finish PGLite bootstrap during dev-server setup (before traffic). Vite awaits
+ * async `configureServer` hooks. Production: `src/lib/db` kicks `ensureDbReady`
+ * on import.
+ *
+ * Vite awaiting the hook puts this on time-to-first-render, so an app with no
+ * migrations — no schema to apply — skips it entirely rather than paying for a
+ * PGLite instance it never queries.
+ */
+function pgliteBootstrapPlugin(): Plugin {
+  return {
+    name: "app-builder:pglite-bootstrap",
+    apply: "serve",
+    async configureServer(server) {
+      if (!hasGlobbedMigrations(server.config.root)) return;
+      try {
+        const mod = (await server.ssrLoadModule("/src/lib/db.ts")) as {
+          ensureDbReady?: () => Promise<void>;
+        };
+        if (typeof mod.ensureDbReady === "function") {
+          await mod.ensureDbReady();
+        }
+      } catch (err) {
+        console.error("[app-builder] DB bootstrap failed:", err);
+        throw err;
+      }
+    },
+  };
+}
+
+/**
+ * Live-preview OAuth popup — handled HERE so the agent never has to create a
+ * `/auth/popup` route (and cannot break it by scaffolding a React page that
+ * paints the full app shell in the popup).
+ *
+ * `signIn` (client.ts) opens `/auth/popup?providerId=…` in a top-level window.
+ * This middleware runs before TanStack Start, calls `handleAuthPopupRequest`,
+ * and returns the 302 / completion HTML. Deployed apps do not use the popup
+ * (full-page OAuth redirect), so `apply: "serve"` is enough.
+ */
+function authPopupPlugin(): Plugin {
+  return {
+    name: "app-builder:auth-popup",
+    apply: "serve",
+    configureServer(server) {
+      // Register immediately (not in a returned post-hook) so we run BEFORE
+      // TanStack Start / the SPA HTML fallback. A model-authored
+      // `src/routes/auth/popup.tsx` React page must never win this path.
+      server.middlewares.use(async (req, res, next) => {
+        try {
+          const rawUrl = req.url ?? "";
+          const pathOnly = rawUrl.split("?", 1)[0] ?? "";
+          if (pathOnly !== "/auth/popup") {
+            next();
+            return;
+          }
+          if ((req.method ?? "GET").toUpperCase() !== "GET") {
+            res.statusCode = 405;
+            res.setHeader("content-type", "text/plain; charset=utf-8");
+            res.end("Method Not Allowed");
+            return;
+          }
+
+          const host = String(
+            req.headers["x-forwarded-host"] ?? req.headers.host ?? "localhost:8080",
+          );
+          const proto = String(
+            req.headers["x-forwarded-proto"] ??
+              ((req.socket as { encrypted?: boolean } | undefined)?.encrypted ? "https" : "http"),
+          );
+          const requestHeaders = new Headers();
+          for (const [key, value] of Object.entries(req.headers)) {
+            if (value === undefined) continue;
+            if (Array.isArray(value)) {
+              for (const v of value) requestHeaders.append(key, v);
+            } else {
+              requestHeaders.set(key, value);
+            }
+          }
+          // Ensure Host is the public preview host so Better Auth's dynamic
+          // baseURL / redirect_uri match the popup origin.
+          if (!requestHeaders.has("host")) requestHeaders.set("host", host);
+
+          const request = new Request(`${proto}://${host}${rawUrl}`, {
+            method: "GET",
+            headers: requestHeaders,
+          });
+
+          const mod = (await server.ssrLoadModule("/src/lib/auth/popup.server.ts")) as {
+            handleAuthPopupRequest: (req: Request) => Promise<Response>;
+          };
+          const response = await mod.handleAuthPopupRequest(request);
+
+          res.statusCode = response.status;
+          // Preserve multiple Set-Cookie headers (OAuth state + session).
+          const setCookies =
+            typeof response.headers.getSetCookie === "function"
+              ? response.headers.getSetCookie()
+              : [];
+          response.headers.forEach((value, key) => {
+            if (key.toLowerCase() === "set-cookie") return;
+            res.setHeader(key, value);
+          });
+          for (const cookie of setCookies) {
+            res.appendHeader("set-cookie", cookie);
+          }
+          const body = Buffer.from(await response.arrayBuffer());
+          res.end(body);
+        } catch (err) {
+          console.error("[app-builder] /auth/popup handler failed:", err);
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader("content-type", "text/plain; charset=utf-8");
+            res.end("auth popup failed");
+          }
+        }
+      });
+    },
+  };
+}
+
+// `0.0.0.0:8080` is the live-preview contract — don't change host/port.
+// The dev server starts once `src/router.tsx` and `src/routes/` exist — see
+// AGENTS.md § "First scaffold".
+export default defineConfig(({ command, isPreview }) => ({
+  server: {
+    host: "0.0.0.0",
+    port: 8080,
+    strictPort: true,
+  },
+  preview: {
+    host: "127.0.0.1",
+    port: 8081,
+    strictPort: true,
+  },
+  resolve: { tsconfigPaths: true },
+  plugins: [
+    pgliteBootstrapPlugin(),
+    // Before tanstackStart so /auth/popup never falls through to the SPA.
+    authPopupPlugin(),
+    // Dev-only /__app-env, read by scripts/check-auth-invariant.mjs.
+    appEnvPlugin(),
+    // PWA head + ?install=1 tutorial page; runs before Start/Nitro.
+    grokPwaPlugin(),
+    tailwindcss(),
+    tanstackStart(),
+    ...(command === "build" || isPreview
+      ? [
+          nitro({
+            preset: "vercel",
+            // Auto-registers server/middleware/* (the PWA install page +
+            // manifest + head-tag middleware). Nitro v3 defaults serverDir to
+            // false, so removing this silently unwires /?install=1 on deploys.
+            serverDir: "./server",
+          }),
+        ]
+      : []),
+    viteReact(),
+  ],
+}));
+
+
+========================================================================
+FILE vercel.json
+========================================================================
+
+{
+  "installCommand": "npm install --omit=dev --no-audit --no-fund"
+}
+
+
+========================================================================
+FILE startup.sh
+========================================================================
+
+#!/bin/sh
+cd /workspace
+if curl -sf -o /dev/null --max-time 1 http://127.0.0.1:8080/; then
+  exit 0
+fi
+npm run dev >/tmp/dev-server.log 2>&1 &
+
+
+========================================================================
+FILE src/styles.css
+========================================================================
+
+@import "tailwindcss";
+
+:root {
+  --ink: #080808;
+  --paper: #f4f4f1;
+  --white: #fff;
+  --grey: #a7a7a2;
+  --line: #c9c9c4;
+  --pad: clamp(22px, 5vw, 76px);
+  --font: "Barlow", Arial, Helvetica, sans-serif;
+  --font-cond: "Barlow Semi Condensed", "Barlow", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+}
+button, input, select, textarea { font: inherit; border-radius: 0; }
+button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.labBar {
+  height: 56px;
+  display: flex;
+  align-items: stretch;
+  background: var(--white);
+  border-bottom: 1px solid var(--ink);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.labMark {
+  width: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid var(--ink);
+  font-family: var(--font-cond);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  font-size: 16px;
+}
+.labBar p {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  letter-spacing: 0.14em;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.labNav { margin-left: auto; display: flex; }
+.labNav a, .labVer {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  border-left: 1px solid var(--ink);
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.labNav a.on, .labNav a:hover { background: var(--ink); color: var(--white); }
+.labVer { color: #555; font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.04em; font-size: 11px; }
+
+.pageHero { padding: 48px var(--pad) 0; color: #fff; background: #111; }
+.pageHeroCompact { padding: 12px var(--pad) 0; }
+.pageHeroCompact h1 { font-size: 28px; margin: 4px 0 0; }
+.pageHeroCompact > p:not(:first-child) { display: none; }
+.pageHeroCompact .pageHeroLine { margin-top: 10px; }
+.pageHeroCompact .pageHeroLine a,
+.pageHeroCompact .pageHeroLine span { padding: 8px 0; }
+.pageHeroCompact + .drawingOffice { padding-top: 12px; }
+.plateStage { min-width: 0; }
+.pageHero h1 {
+  letter-spacing: -0.04em;
+  max-width: 920px;
+  margin: 22px 0 18px;
+  font-size: clamp(32px, 5vw, 56px);
+  line-height: 0.95;
+  font-weight: 800;
+}
+.pageHero.pageHeroCompact h1 { font-size: 28px; margin: 4px 0 0; }
+.pageHero > p:first-child {
+  margin: 0;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.pageHero > p:not(:first-child) { color: #b7b7b7; max-width: 760px; font-size: 15px; line-height: 1.55; }
+.pageHeroLine {
+  border-top: 1px solid #444;
+  margin-top: 36px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+.pageHeroLine a, .pageHeroLine span {
+  letter-spacing: 0.1em;
+  padding: 16px 0;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+  border-right: 1px solid #333;
+}
+.pageHeroLine a:hover { color: #fff; }
+
+.drawingOffice { background: var(--paper); color: var(--ink); padding: 28px var(--pad) 80px; }
+.titleBlock {
+  background: #fff;
+  border: 2px solid #111;
+  display: grid;
+  grid-template-columns: 120px 1fr auto;
+  margin: 0 0 18px;
+}
+.tbLogo, .tbMid, .tbMeta { display: flex; flex-direction: column; justify-content: center; }
+.tbLogo {
+  align-items: center;
+  border-right: 2px solid #111;
+  font-family: var(--font-cond);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  font-size: 18px;
+}
+.tbMid { padding: 12px 18px; gap: 4px; }
+.tbKicker { margin: 0; letter-spacing: 0.16em; font-size: 10px; font-weight: 800; font-family: var(--font-cond); }
+.tbMid h1, .tbName {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  font-size: clamp(22px, 3vw, 32px);
+  line-height: 1;
+  font-weight: 800;
+}
+.tbMeta {
+  color: #fff;
+  background: #111;
+  min-width: 168px;
+  padding: 12px 16px;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.command {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.command input, .refSearch {
+  background: #fff;
+  border: 2px solid #111;
+  min-height: 48px;
+  padding: 0 12px;
+  font-size: 16px;
+  font-weight: 500;
+  width: 100%;
+}
+.toolBtn {
+  color: #fff;
+  letter-spacing: 0.12em;
+  background: #111;
+  border: 1px solid #111;
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.toolBtn.ghost { color: #111; background: #fff; }
+.toolBtn:hover { color: #fff; background: #333; }
+.toolBtn.ghost:hover { color: #fff; background: #111; }
+.toolBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.toolToolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+
+.toolLayout {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(280px, 1.15fr) minmax(280px, 1.15fr);
+  gap: 14px;
+  align-items: start;
+}
+.toolLayout.boltSheet { grid-template-columns: 1fr 1fr; }
+.figureRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 280px);
+  gap: 18px;
+  align-items: start;
+}
+.figureRow.figureFixed {
+  grid-template-columns: 480px minmax(180px, 240px);
+  justify-content: start;
+}
+.drawingFrame { background: #f6f4ee; border: 1px solid #111; width: 480px; max-width: 100%; }
+.drawingFrame svg { width: 480px; max-width: 100%; height: auto; display: block; }
+.toolPanel { background: #fff; border: 1px solid #111; padding: 16px; min-width: 0; }
+.toolPanel h2 {
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 2px solid #111;
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  font-size: 14px;
+  font-family: var(--font-cond);
+}
+.fieldGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.fieldGrid.one { grid-template-columns: 1fr; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > span {
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.field small {
+  color: #444;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+  text-transform: none;
+}
+.designSheet .field > span {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.designSheet .infoTip { position: relative; font-weight: 450; }
+.designSheet .infoTip summary {
+  cursor: pointer;
+  list-style: none;
+  width: 22px;
+  height: 22px;
+  border: 1px solid #111;
+  display: inline-grid;
+  place-items: center;
+  font-size: 12px;
+}
+.designSheet .infoTip summary::-webkit-details-marker { display: none; }
+.designSheet .infoTip p {
+  margin: 6px 0 0;
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 450;
+}
+.govBlock { border: 2px solid #111; padding: 12px 14px; margin: 12px 0; background: #fff; }
+.govBlock h3 { margin: 0 0 10px; font-size: 15px; }
+.govGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; }
+.govGrid span { display: block; font-size: 11px; letter-spacing: 0.02em; text-transform: none; color: #444; font-weight: 650; }
+.govGrid b { display: block; font-size: 18px; font-weight: 650; margin-top: 2px; }
+.sourceChoice { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 450; }
+.sourceChoice label { display: flex; gap: 8px; align-items: flex-start; }
+.quietHelp { margin: 0 0 10px; font-size: 13px; }
+.quietHelp summary { cursor: pointer; font-weight: 650; }
+.traceBlock { border-top: 1px solid #111; padding: 8px 0; font-size: 13px; line-height: 1.45; }
+.traceBlock p { margin: 0 0 4px; }
+@media (max-width: 720px) {
+  .govGrid { grid-template-columns: 1fr; }
+}
+.toolField, .toolSelect {
+  color: #111;
+  background: #fff;
+  border: 2px solid #111;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  font-size: 15px;
+  font-weight: 500;
+}
+.toolSelect {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, #111 50%), linear-gradient(135deg, #111 50%, transparent 50%);
+  background-position: calc(100% - 16px) 50%, calc(100% - 10px) 50%;
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+.toolNote { color: #444; margin: 12px 0 0; font-size: 12px; line-height: 1.55; }
+.failBanner {
+  color: #fff;
+  background: #111;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+}
+
+.toolTabs { border: 1px solid #111; display: flex; flex-wrap: wrap; margin-bottom: 12px; }
+.toolTabs button {
+  letter-spacing: 0.08em;
+  background: #fff;
+  border: 0;
+  border-right: 1px solid #111;
+  border-bottom: 1px solid #111;
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.toolTabs button.on { color: #fff; background: #111; }
+
+.identity { margin: 0 0 8px; }
+.identity b { display: block; font-size: 22px; letter-spacing: -0.03em; line-height: 1.1; }
+.identity span { color: #555; font-family: var(--font-mono); font-size: 12px; }
+
+.drawingCaption {
+  background: #fff;
+  border-top: 1px solid #111;
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.boltSvg text {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  fill: #111;
+  stroke: #f6f4ee;
+  stroke-width: 5px;
+  paint-order: stroke;
+  stroke-linejoin: round;
+}
+.boltSvg .line { fill: #f6f4ee; stroke: #111; stroke-width: 1.6; }
+.boltSvg .thin { fill: none; stroke: #111; stroke-width: 1; }
+.boltSvg .minor { fill: none; stroke: #111; stroke-width: 0.9; }
+.boltSvg .ext { fill: none; stroke: #111; stroke-width: 0.8; }
+.boltSvg .dim { fill: none; stroke: #111; stroke-width: 0.9; }
+.boltSvg .center { fill: none; stroke: #111; stroke-width: 0.7; stroke-dasharray: 14 3 1.4 3; }
+.boltSvg .ghost { stroke-dasharray: 5 3; }
+.boltSvg .muted { fill: #444; font-size: 12px; }
+.boltSvg .hotline,
+.boltSvg .hotline .dim,
+.boltSvg .hotline .ext,
+.boltSvg .hotline .minor {
+  stroke-width: 2.4;
+}
+.boltSvg .hot text, .boltSvg text.hot { font-weight: 600; }
+
+.resultList { border-top: 2px solid #111; display: grid; grid-template-columns: 1fr auto; }
+.resultList div { display: contents; }
+.resultList span {
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #ccc;
+  padding: 9px 8px;
+  font-size: 12px;
+}
+.resultList b {
+  text-align: right;
+  border-bottom: 1px solid #ccc;
+  padding: 9px 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.resultList b.fail, .resultList span.fail { color: #fff; background: #111; }
+.resultList span.hotLabel { background: #111; color: #fff; }
+
+.toolTableWrap { width: 100%; overflow-x: auto; margin-top: 12px; }
+.toolTable { border-collapse: collapse; width: 100%; min-width: 520px; font-size: 12px; }
+.toolTable th, .toolTable td { text-align: right; white-space: nowrap; border: 1px solid #c9c9c4; padding: 8px 10px; }
+.toolTable th {
+  color: #fff;
+  letter-spacing: 0.08em;
+  text-align: left;
+  background: #111;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-cond);
+}
+.toolTable td:first-child, .toolTable th:first-child { text-align: left; }
+.toolTable td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.toolTable td.hi { background: #111; color: #fff; }
+.toolTable td.lo { background: #e4e4de; }
+.toolTable tr.active td { background: #111; color: #fff; }
+
+.formulaBox { color: #fff; background: #111; margin-top: 12px; padding: 14px 16px; font-size: 12px; line-height: 1.6; }
+.formulaBox b { display: block; letter-spacing: 0.14em; margin-bottom: 6px; font-family: var(--font-cond); font-size: 11px; }
+.formulaBox p { margin: 0 0 6px; font-family: var(--font-mono); }
+
+.toolGloss { background: #fff; border: 1px solid #111; margin-top: 12px; }
+.toolGloss summary {
+  cursor: pointer;
+  letter-spacing: 0.1em;
+  padding: 10px 12px;
+  font-family: var(--font-cond);
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+.toolGloss summary::-webkit-details-marker { display: none; }
+.toolGloss summary:after { content: " +"; float: right; }
+.toolGloss[open] summary:after { content: " –"; }
+.toolGloss .inner { border-top: 1px solid #111; padding: 12px; }
+
+.topicChips { display: flex; flex-wrap: wrap; border: 1px solid #111; background: #fff; margin-top: 8px; }
+.topicChips button {
+  letter-spacing: 0.06em;
+  background: #fff;
+  border: 0;
+  border-right: 1px solid #111;
+  border-bottom: 1px solid #111;
+  min-height: 40px;
+  padding: 0 10px;
+  font-size: 10px;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.topicChips button.on { color: #fff; background: #111; }
+
+.unitRow {
+  display: grid;
+  grid-template-columns: 92px 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  border-bottom: 1px solid #ccc;
+  padding: 6px 0;
+}
+.unitRow strong { font-family: var(--font-cond); font-size: 13px; letter-spacing: 0.04em; }
+.unitRow input {
+  border: 2px solid transparent;
+  background: transparent;
+  min-height: 40px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  width: 100%;
+}
+.unitRow.active input, .unitRow input:focus { border-color: #111; background: #fff; padding: 0 8px; }
+.copyBtn {
+  border: 1px solid #111;
+  background: #fff;
+  min-height: 36px;
+  padding: 0 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  font-weight: 800;
+  font-family: var(--font-cond);
+}
+.copyBtn:hover { background: #111; color: #fff; }
+
+.catList { display: flex; flex-direction: column; max-height: 640px; overflow: auto; border: 1px solid #111; background: #fff; }
+.catList button {
+  text-align: left;
+  background: #fff;
+  border: 0;
+  border-bottom: 1px solid #ddd;
+  min-height: 44px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.catList button small { display: block; color: #777; letter-spacing: 0.12em; font-size: 9px; font-weight: 800; font-family: var(--font-cond); }
+.catList button.on { background: #111; color: #fff; }
+.catList button.on small { color: #bbb; }
+
+.calRegister { background: #fff; border-top: 1px solid #111; }
+.drawingOffice .calRegister { margin-left: calc(var(--pad) * -1); margin-right: calc(var(--pad) * -1); }
+.isEmbed .pageHero { display: none; }
+.isEmbed .drawingOffice { padding-top: 16px; }
+.calRegister > p {
+  letter-spacing: 0.14em;
+  padding: 10px var(--pad);
+  color: #fff;
+  background: #111;
+  margin: 0;
+  font-family: var(--font-cond);
+  font-size: 12px;
+  font-weight: 800;
+}
+.calRow {
+  padding: 12px var(--pad);
+  color: inherit;
+  background: #fff;
+  border-bottom: 1px solid #ddd;
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 16px;
+}
+.calRow:hover { background: #e4e4de; }
+.calRow span { letter-spacing: 0.08em; color: #777; font-family: var(--font-cond); font-size: 12px; font-weight: 800; }
+.calRow b { display: block; font-size: 16px; }
+.calRow p { margin: 2px 0 0; color: #444; font-size: 13px; }
+.calRow strong { letter-spacing: 0.1em; font-size: 12px; font-family: var(--font-cond); }
+.planned { margin-top: 22px; }
+.planned summary {
+  cursor: pointer;
+  letter-spacing: 0.12em;
+  padding: 12px 0;
+  font-family: var(--font-cond);
+  font-size: 12px;
+  font-weight: 800;
+}
+.planned summary::-webkit-details-marker { display: none; }
+.calRow.later { color: #666; }
+.calRow.later:hover { background: #fff; }
+.calRow.later strong { color: #999; }
+
+.toolWarning {
+  margin: 28px var(--pad) 0;
+  letter-spacing: 0.04em;
+  border: 1px solid #111;
+  padding: 16px 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: #fff;
+}
+.toolWarning b { display: block; letter-spacing: 0.12em; font-size: 10px; margin-bottom: 6px; font-family: var(--font-cond); }
+
+.bench {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.benchMain {
+  flex: 0 0 34%;
+  width: 34%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.benchSide {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.figureStack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.figureStack .resultList { width: min(480px, 100%); }
+.fieldGrid.compact {
+  grid-template-columns: repeat(auto-fill, minmax(150px, 220px));
+  justify-content: start;
+}
+.checkSplit {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.42fr) minmax(0, 0.58fr);
+  gap: 16px;
+  align-items: start;
+}
+.drawingFrame.jointFrame { width: 100%; }
+.drawingFrame.jointFrame svg { width: 100%; max-width: none; height: auto; }
+.jointSvg text {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  fill: #111;
+  stroke: #f6f4ee;
+  stroke-width: 3px;
+  paint-order: stroke;
+  stroke-linejoin: round;
+}
+.jointSvg .cap { font-family: var(--font-cond); font-size: 12px; font-weight: 700; letter-spacing: 0.06em; }
+.jointSvg .plate { fill: #f3f1ea; stroke: #111; stroke-width: 1.5; }
+.jointSvg .bolt { fill: #fff; stroke: #111; stroke-width: 1.5; }
+.jointSvg .hatch line { fill: none; stroke: #111; stroke-width: 0.55; }
+.jointSvg .leader, .jointSvg .witness, .jointSvg .tick, .jointSvg .dim, .jointSvg .shear { fill: none; stroke: #111; stroke-width: 1.05; }
+.jointSvg .dim { stroke-width: 1; }
+.jointSvg .shear { stroke-dasharray: 7 4; stroke-width: 1.35; }
+.jointSvg .center { fill: none; stroke: #111; stroke-width: 0.7; stroke-dasharray: 11 3 1.4 3; }
+.jointSvg .dot { fill: #111; stroke: none; }
+.jointSvg .action line { fill: none; stroke: #111; stroke-width: 3.2; }
+.jointSvg .hot .plate, .jointSvg .hot .bolt, .jointSvg .hot .dim, .jointSvg .hot .shear, .jointSvg .hot .leader, .jointSvg .hot .action line { stroke-width: 2.6; }
+.jointSvg text.hot, .jointSvg .hot text { font-weight: 600; }
+.caseRow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.caseChip {
+  margin: 0;
+  border: 1px solid #111;
+  padding: 6px 8px;
+  font-family: var(--font-cond);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.caseChip.on { background: #111; color: #fff; }
+
+.spanAll { grid-column: 1 / -1; }
+.recent { margin: 8px 0 0; padding: 0; list-style: none; }
+.recent li { border-bottom: 1px solid #ddd; padding: 6px 0; font-family: var(--font-mono); font-size: 12px; }
+.groupLabel { letter-spacing: 0.14em; font-size: 10px; font-weight: 800; font-family: var(--font-cond); margin: 14px 0 6px; color: #555; }
+
+.printOnly { display: none; }
+@media print {
+  .labBar, .pageHero, .toolToolbar, .command, .topicChips, .copyBtn, .catList, .noPrint { display: none !important; }
+  .printOnly { display: block; }
+  body { background: #fff; }
+  .drawingOffice { padding: 0; }
+  .toolLayout { display: block; }
+  .toolPanel { break-inside: avoid; margin-bottom: 10px; }
+}
+
+.plateDesk {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(280px, 360px);
+  gap: 14px;
+  align-items: start;
+}
+.plateCol { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.plateSvg { width: 100%; height: auto; display: block; }
+.plateSvg text {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  fill: #111;
+  stroke: #f6f4ee;
+  stroke-width: 4px;
+  paint-order: stroke;
+  stroke-linejoin: round;
+}
+.plateSvg .cap { font-family: var(--font-cond); font-size: 15px; font-weight: 700; letter-spacing: 0.05em; stroke-width: 0; }
+.plateSvg .tag { font-size: 18px; }
+.plateSvg .dimText { font-size: 18px; font-weight: 600; }
+.plateSvg .plateFill { fill: #f6f4ee; stroke: #111; stroke-width: 1.6; }
+.plateSvg .edge { stroke: #111; stroke-width: 2.6; fill: none; }
+.plateSvg .free { stroke-dasharray: 8 5; }
+.plateSvg .dim, .plateSvg .ext, .plateSvg .axis line, .plateSvg .hatch, .plateSvg .spring { fill: none; stroke: #111; stroke-width: 1.2; }
+.plateSvg .action line { fill: none; stroke: #111; stroke-width: 2.4; }
+.plateSvg .mesh { fill: none; stroke: #9a9a94; stroke-width: 0.7; }
+.plateSvg .support { fill: #fff; stroke: #111; stroke-width: 1.5; }
+.plateSvg .hot .edge, .plateSvg .hot .dim, .plateSvg .hot .ext, .plateSvg .hot .plateFill, .plateSvg .hot .action line, .plateSvg .hot .spring, .plateSvg .hot .hatch { stroke: #111; stroke-width: 3.2; }
+.plateSvg .hot .support { stroke-width: 2.4; }
+.plateSvg .hot text { font-weight: 700; }
+.plateSvg .stiff { stroke: #111; stroke-width: 3.4; }
+.plateSvg .joint { fill: #111; stroke: #fff; stroke-width: 1; }
+.plateSvg .panel { fill: transparent; stroke: #111; stroke-width: 0.8; stroke-dasharray: 5 3; }
+.plateSvg .panelOn { fill: rgba(17, 17, 17, 0.06); stroke: #111; stroke-width: 2.2; }
+.plateSvg .patch { fill: rgba(17, 17, 17, 0.14); stroke: #111; stroke-width: 1.3; }
+.plateSvg .na { stroke: #111; stroke-width: 1.1; stroke-dasharray: 6 4; }
+.plateSvg .ineff { fill: url(#ineffHatch); stroke: none; }
+.plateTabs button { letter-spacing: 0.04em; padding: 0 8px; font-size: 11px; }
+.presetRow { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.plateDesk.leftOff { grid-template-columns: minmax(0, 1fr) minmax(240px, 340px); }
+.plateDesk.rightOff { grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); }
+.plateDesk.bothOff { grid-template-columns: minmax(0, 1fr); }
+.plateBottom { margin-top: 14px; }
+.modeCanvas {
+  width: 100%;
+  height: min(520px, 68vw);
+  min-height: 280px;
+  display: block;
+  background: #f6f4ee;
+  border: 1px solid #111;
+  touch-action: none;
+  cursor: grab;
+}
+.okBanner {
+  color: #111;
+  background: #fff;
+  border: 2px solid #111;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  font-family: var(--font-cond);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  font-size: 13px;
+}
+.rowOn { background: #111; color: #fff; }
+.rowOn td { color: #fff; }
+.convPlot { width: 100%; height: auto; display: block; background: #fff; border: 1px solid #111; }
+
+@media (width <= 1680px) {
+  .benchMain { flex-basis: 40%; width: 40%; }
+}
+@media (width <= 1200px) {
+  .labBar p { display: none; }
+}
+@media (width <= 1100px) {
+  .toolLayout { grid-template-columns: 1fr 1fr; }
+  .spanAll { grid-column: 1 / -1; }
+  .bench { flex-direction: column; }
+  .benchMain { width: 100%; flex-basis: auto; }
+  .plateDesk, .plateDesk.leftOff, .plateDesk.rightOff, .plateDesk.bothOff { grid-template-columns: 1fr; }
+  .plateStage { order: -1; }
+}
+@media (width <= 760px) {
+  .labBar p, .labVer { display: none; }
+  .drawingOffice .calRegister { margin-left: -16px; margin-right: -16px; }
+  .toolLayout, .fieldGrid, .titleBlock, .pageHeroLine, .command, .unitRow, .figureRow, .figureRow.figureFixed, .checkSplit, .bench { grid-template-columns: 1fr; }
+  .drawingFrame, .drawingFrame svg { width: 100%; }
+  .figureRow, .figureRow.figureFixed, .toolPanel, .benchMain, .benchSide { min-width: 0; }
+  .figureRow.figureFixed > * { min-width: 0; max-width: 100%; }
+  .titleBlock .tbLogo { border-right: 0; border-bottom: 2px solid #111; min-height: 48px; }
+  .tbMeta { border-top: 2px solid #111; }
+  .drawingOffice { padding: 18px 16px 64px; }
+  .pageHero { padding: 32px 22px 0; }
+  .pageHero h1 { font-size: 34px; }
+  .calRow { grid-template-columns: 88px 1fr auto; padding-left: 16px; padding-right: 16px; }
+  .unitRow { grid-template-columns: 72px 1fr; }
+  .copyBtn { justify-self: start; }
+}
+
+
+========================================================================
+FILE src/router.tsx
+========================================================================
+
+import { createRouter } from "@tanstack/react-router"
+import { AppErrorComponent } from "@/lib/error-component"
+import { routeTree } from "./routeTree.gen"
+
+export function getRouter() {
+  return createRouter({ routeTree, defaultErrorComponent: AppErrorComponent })
+}
+
+
+========================================================================
+FILE src/routeTree.gen.ts
+========================================================================
+
+/* eslint-disable */
+
+// @ts-nocheck
+
+// noinspection JSUnusedGlobalSymbols
+
+// This file was automatically generated by TanStack Router.
+// You should NOT make any changes in this file as it will be overwritten.
+// Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
+
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as BoltsRouteImport } from './routes/bolts'
+import { Route as PlateRouteImport } from './routes/plate'
+import { Route as UnitsRouteImport } from './routes/units'
+import { Route as BoltsSlugRouteImport } from './routes/bolts.$slug'
+
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BoltsRoute = BoltsRouteImport.update({
+  id: '/bolts',
+  path: '/bolts',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PlateRoute = PlateRouteImport.update({
+  id: '/plate',
+  path: '/plate',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UnitsRoute = UnitsRouteImport.update({
+  id: '/units',
+  path: '/units',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BoltsSlugRoute = BoltsSlugRouteImport.update({
+  id: '/$slug',
+  path: '/$slug',
+  getParentRoute: () => BoltsRoute,
+} as any)
+
+export interface FileRoutesByFullPath {
+  '/': typeof IndexRoute
+  '/bolts': typeof BoltsRouteWithChildren
+  '/plate': typeof PlateRoute
+  '/units': typeof UnitsRoute
+  '/bolts/$slug': typeof BoltsSlugRoute
+}
+export interface FileRoutesByTo {
+  '/': typeof IndexRoute
+  '/bolts': typeof BoltsRouteWithChildren
+  '/plate': typeof PlateRoute
+  '/units': typeof UnitsRoute
+  '/bolts/$slug': typeof BoltsSlugRoute
+}
+export interface FileRoutesById {
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/bolts': typeof BoltsRouteWithChildren
+  '/plate': typeof PlateRoute
+  '/units': typeof UnitsRoute
+  '/bolts/$slug': typeof BoltsSlugRoute
+}
+export interface FileRouteTypes {
+  fileRoutesByFullPath: FileRoutesByFullPath
+  fullPaths: '/' | '/bolts' | '/plate' | '/units' | '/bolts/$slug'
+  fileRoutesByTo: FileRoutesByTo
+  to: '/' | '/bolts' | '/plate' | '/units' | '/bolts/$slug'
+  id: '__root__' | '/' | '/bolts' | '/plate' | '/units' | '/bolts/$slug'
+  fileRoutesById: FileRoutesById
+}
+export interface RootRouteChildren {
+  IndexRoute: typeof IndexRoute
+  BoltsRoute: typeof BoltsRouteWithChildren
+  PlateRoute: typeof PlateRoute
+  UnitsRoute: typeof UnitsRoute
+}
+
+declare module '@tanstack/react-router' {
+  interface FileRoutesByPath {
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/bolts': {
+      id: '/bolts'
+      path: '/bolts'
+      fullPath: '/bolts'
+      preLoaderRoute: typeof BoltsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/plate': {
+      id: '/plate'
+      path: '/plate'
+      fullPath: '/plate'
+      preLoaderRoute: typeof PlateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/units': {
+      id: '/units'
+      path: '/units'
+      fullPath: '/units'
+      preLoaderRoute: typeof UnitsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/bolts/$slug': {
+      id: '/bolts/$slug'
+      path: '/$slug'
+      fullPath: '/bolts/$slug'
+      preLoaderRoute: typeof BoltsSlugRouteImport
+      parentRoute: typeof BoltsRoute
+    }
+  }
+}
+
+interface BoltsRouteChildren {
+  BoltsSlugRoute: typeof BoltsSlugRoute
+}
+
+const BoltsRouteChildren: BoltsRouteChildren = {
+  BoltsSlugRoute: BoltsSlugRoute,
+}
+
+const BoltsRouteWithChildren = BoltsRoute._addFileChildren(BoltsRouteChildren)
+
+const rootRouteChildren: RootRouteChildren = {
+  IndexRoute: IndexRoute,
+  BoltsRoute: BoltsRouteWithChildren,
+  PlateRoute: PlateRoute,
+  UnitsRoute: UnitsRoute,
+}
+export const routeTree = rootRouteImport
+  ._addFileChildren(rootRouteChildren)
+  ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { createStart } from '@tanstack/react-start'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+  }
+}
+
+
+========================================================================
+FILE src/lib/error-component.tsx
+========================================================================
+
+import type { ErrorComponentProps } from "@tanstack/react-router";
+import { TriangleAlert } from "lucide-react";
+
+const FALLBACK_MESSAGE = "An unexpected error occurred. Try reloading the page.";
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return FALLBACK_MESSAGE;
+}
+
+export function AppErrorComponent({ error }: ErrorComponentProps) {
+  return (
+    <main
+      className={
+        "flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center " +
+        "bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50"
+      }
+    >
+      <span className="text-red-500" aria-hidden="true">
+        <TriangleAlert className="size-10" strokeWidth={2} />
+      </span>
+      <h1 className="text-lg font-semibold">Something went wrong</h1>
+      <p className="max-w-md text-sm break-words text-zinc-500 dark:text-zinc-400">
+        {errorMessage(error)}
+      </p>
+    </main>
+  );
+}
+
+
+========================================================================
+FILE src/lib/og/site.json
+========================================================================
+
+{
+  "title": "IQEG Reference Lab",
+  "color": "080808"
+}
+
+
+========================================================================
+FILE src/routes/__root.tsx
+========================================================================
+
+import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router"
+import { AuthProvider } from "@/lib/auth/provider"
+import { PreviewHostBridge } from "@/components/preview-host-bridge"
+import appCss from "../styles.css?url"
+
+export const Route = createRootRoute({
+  head: () => ({
+    meta: [
+      { charSet: "utf-8" },
+      { name: "viewport", content: "width=device-width, initial-scale=1" },
+      { title: "IQEG Reference Lab" },
+      { name: "description", content: "Bolt and fastener reference and engineering unit converter for IQ Engineering Group." },
+      { name: "theme-color", content: "#080808" },
+    ],
+    links: [
+      { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
+      { rel: "stylesheet", href: appCss },
+      { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" },
+      { rel: "manifest", href: "/__grok/manifest.webmanifest" },
+      { rel: "apple-touch-icon", href: "/__grok/icon-180.png" },
+    ],
+  }),
+  component: () => (
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <HeadContent />
+      </head>
+      <body>
+        <PreviewHostBridge />
+        <AuthProvider>
+          <Outlet />
+        </AuthProvider>
+        <Scripts />
+      </body>
+    </html>
+  ),
+})
+
+
+========================================================================
+FILE src/routes/bolts.$slug.tsx
+========================================================================
+
+import { createFileRoute } from "@tanstack/react-router"
+import { useMemo } from "react"
+import { BoltTool } from "../components/bolt-tool.tsx"
+import { CommandBar } from "../components/command-bar.tsx"
+import { LabShell } from "../components/lab-shell.tsx"
+import { DEFAULT_SELECTION, selectionFromSlug } from "../bolts/model.ts"
+
+export const Route = createFileRoute("/bolts/$slug")({
+  validateSearch: (search: Record<string, unknown>): { embed?: "1" } => {
+    const out: { embed?: "1" } = {}
+    if (search.embed === "1") out.embed = "1"
+    return out
+  },
+  component: BoltSlugPage,
+})
+
+function BoltSlugPage() {
+  const { slug } = Route.useParams()
+  const resolved = useMemo(() => {
+    const next = selectionFromSlug(slug)
+    if ("error" in next) return { selection: DEFAULT_SELECTION, warn: next.error }
+    return { selection: next, warn: "" }
+  }, [slug])
+  return (
+    <LabShell
+      kicker="IQEG / ENGINEERING REFERENCE"
+      title="Bolt and fastener reference."
+      lede="Direct link to one bolt. Confirm the standard before you use the number."
+      ident="IQ-REF-001"
+      rev="REV 0 · INDICATIVE"
+    >
+      <CommandBar />
+      {resolved.warn ? <p className="failBanner">{resolved.warn}</p> : null}
+      <BoltTool start={resolved.selection} query={null} />
+    </LabShell>
+  )
+}
+
+
+========================================================================
+FILE src/routes/bolts.tsx
+========================================================================
+
+import { createFileRoute } from "@tanstack/react-router"
+import { useMemo } from "react"
+import { BoltTool } from "../components/bolt-tool.tsx"
+import { CommandBar } from "../components/command-bar.tsx"
+import { LabShell } from "../components/lab-shell.tsx"
+import { DEFAULT_SELECTION, selectionFromQuery } from "../bolts/model.ts"
+import { parseBoltQuery } from "../bolts/search.ts"
+
+export const Route = createFileRoute("/bolts")({
+  validateSearch: (search: Record<string, unknown>): { embed?: "1"; q?: string } => {
+    const out: { embed?: "1"; q?: string } = {}
+    if (search.embed === "1") out.embed = "1"
+    if (typeof search.q === "string") out.q = search.q
+    return out
+  },
+  component: BoltsPage,
+})
+
+function BoltsPage() {
+  const { q } = Route.useSearch()
+  const query = useMemo(() => (q ? parseBoltQuery(q) : null), [q])
+  const resolved = useMemo(() => {
+    if (!query?.matched) return { selection: DEFAULT_SELECTION, warn: query ? "No bolt matched that search." : "" }
+    const next = selectionFromQuery(query)
+    if ("error" in next) return { selection: DEFAULT_SELECTION, warn: next.error }
+    return { selection: next, warn: "" }
+  }, [query])
+  return (
+    <LabShell
+      kicker="IQEG / ENGINEERING REFERENCE"
+      title="Bolt and fastener reference."
+      lede="Look up a bolt, then run the AS 4100 check only if you need it. The check is written in words: what you apply, where the shear cuts the bolt, and whether the plate is included. Classes 4.6, 8.8 and 10.9 only."
+      ident="IQ-REF-001"
+      rev="REV 0 · INDICATIVE"
+    >
+      <CommandBar initial={q ?? ""} />
+      {resolved.warn ? <p className="failBanner">{resolved.warn}</p> : null}
+      <BoltTool start={resolved.selection} query={query} />
+    </LabShell>
+  )
+}
+
+
+========================================================================
+FILE src/routes/index.tsx
+========================================================================
+
+import { createFileRoute, Link } from "@tanstack/react-router"
+import { CommandBar } from "../components/command-bar.tsx"
+import { LabShell, useLabQuery } from "../components/lab-shell.tsx"
+import { LAB_MODULES } from "../reference/registry.ts"
+
+export const Route = createFileRoute("/")({
+  validateSearch: (search: Record<string, unknown>): { embed?: "1"; q?: string } => {
+    const out: { embed?: "1"; q?: string } = {}
+    if (search.embed === "1") out.embed = "1"
+    if (typeof search.q === "string") out.q = search.q
+    return out
+  },
+  component: Home,
+})
+
+function Home() {
+  const { embed } = useLabQuery()
+  const groups = [...new Set(LAB_MODULES.map((item) => item.group))]
+  return (
+    <LabShell
+      kicker="IQEG ENGINEERING REFERENCE LAB"
+      title="Engineering reference."
+      lede="Three working tools. Plate buckling: elastic critical stress, with a separate finite-element check. Bolts: thread, strength, mass, and an optional AS 4100 check. Units: one number fills the table, and a mismatched dimension is refused. Indicative — not a certificate."
+      ident="IQ-CAL-PLB — IQ-REF-002"
+      rev="REV 0 · INDICATIVE"
+    >
+      <CommandBar />
+      <section className="calRegister">
+        <p>OPEN</p>
+        {LAB_MODULES.filter((item) => item.status === "live").map((item) => {
+          const search = embed ? { embed: "1" as const } : undefined
+          const body = (
+            <>
+              <span>{item.id}</span>
+              <div>
+                <b>{item.title}</b>
+                <p>{item.summary}</p>
+              </div>
+              <strong>OPEN</strong>
+            </>
+          )
+          if (item.href === "/plate") {
+            return <Link key={item.id} to="/plate" search={search} className="calRow">{body}</Link>
+          }
+          if (item.href === "/bolts") {
+            return <Link key={item.id} to="/bolts" search={search} className="calRow">{body}</Link>
+          }
+          return <Link key={item.id} to="/units" search={search} className="calRow">{body}</Link>
+        })}
+      </section>
+      <details className="planned">
+        <summary>PLANNED REFERENCES — NOT BUILT</summary>
+        <section className="calRegister">
+          {groups.filter((group) => LAB_MODULES.some((item) => item.group === group && item.status === "later")).map((group) => (
+            <div key={group}>
+              <p>{group}</p>
+              {LAB_MODULES.filter((item) => item.group === group && item.status === "later").map((item) => (
+                <div key={item.id} className="calRow later">
+                  <span>{item.id}</span>
+                  <div>
+                    <b>{item.title}</b>
+                    <p>{item.summary}</p>
+                  </div>
+                  <strong>NOT BUILT</strong>
+                </div>
+              ))}
+            </div>
+          ))}
+        </section>
+      </details>
+    </LabShell>
+  )
+}
+
+
+========================================================================
+FILE src/routes/plate.tsx
+========================================================================
+
+import { createFileRoute } from "@tanstack/react-router"
+import { PlateTool } from "../components/plate-tool.tsx"
+import { LabShell } from "../components/lab-shell.tsx"
+
+export const Route = createFileRoute("/plate")({
+  validateSearch: (search: Record<string, unknown>): { embed?: "1" } => {
+    const out: { embed?: "1" } = {}
+    if (search.embed === "1") out.embed = "1"
+    return out
+  },
+  component: PlatePage,
+})
+
+function PlatePage() {
+  return (
+    <LabShell
+      kicker="IQEG / PLATE STABILITY"
+      title="Plate and panel buckling."
+      lede="Elastic critical stress for a rectangular panel, with a separate finite-element check. AS 4100 plate and web checks are on DESIGN, freeze IQ-PLB-AS4100-D1.0. That is a verified subset, not a complete member design."
+      ident="IQ-CAL-PLB"
+      rev="REV 0"
+      compact
+    >
+      <PlateTool />
+    </LabShell>
+  )
+}
+
+
+========================================================================
+FILE src/routes/units.tsx
+========================================================================
+
+import { createFileRoute } from "@tanstack/react-router"
+import { CommandBar } from "../components/command-bar.tsx"
+import { LabShell } from "../components/lab-shell.tsx"
+import { UnitTool } from "../components/unit-tool.tsx"
+
+export const Route = createFileRoute("/units")({
+  validateSearch: (search: Record<string, unknown>): { embed?: "1"; q?: string } => {
+    const out: { embed?: "1"; q?: string } = {}
+    if (search.embed === "1") out.embed = "1"
+    if (typeof search.q === "string") out.q = search.q
+    return out
+  },
+  component: UnitsPage,
+})
+
+function UnitsPage() {
+  const { q } = Route.useSearch()
+  return (
+    <LabShell
+      kicker="IQEG / ENGINEERING REFERENCE"
+      title="Unit converter."
+      lede="Type a value in any row, or a line such as 350 MPa to psi. Every other unit in that quantity updates. Temperature includes the offset. A unit from a different quantity is refused."
+      ident="IQ-REF-002"
+      rev="REV 0 · INDICATIVE"
+    >
+      <CommandBar initial={q ?? ""} />
+      <UnitTool initialQuery={q ?? ""} />
+    </LabShell>
+  )
+}
+
+
+========================================================================
+FILE src/components/bolt-diagram.tsx
+========================================================================
+
+type Props = {
+  hot: string | null
+  dText: string
+  pitchText: string
+  kText: string | null
+  sText: string | null
+  lengthText: string | null
+  threadText: string | null
+  dMm: number
+  kMm: number | null
+  sMm: number | null
+  minorMm: number | null
+  lengthMm: number | null
+  threadMm: number | null
+}
+
+const W = 720
+
+export function BoltDiagram(props: Props) {
+  if (!(props.dMm > 0)) {
+    return (
+      <div className="drawingFrame">
+        <p className="drawingCaption">No figure — this combination is not in the dataset.</p>
+      </div>
+    )
+  }
+
+  const d = props.dMm
+  const hasHead = props.kMm != null && props.sMm != null && props.kMm > 0 && props.sMm > 0
+  const dPx = 78
+  const sRatio = hasHead ? props.sMm! / d : 1.5
+  const kRatio = hasHead ? props.kMm! / d : 0.64
+  const sPx = dPx * Math.min(Math.max(sRatio, 1.3), 1.9)
+  const kPx = dPx * Math.min(Math.max(kRatio, 0.42), 0.9)
+
+  const topPad = 22
+  const cy = topPad + sPx / 2
+  const headLeft = 36
+  const headRight = headLeft + kPx
+  const tipX = 548
+  const shankTop = cy - dPx / 2
+  const shankBot = cy + dPx / 2
+  const headTop = cy - sPx / 2
+  const headBot = cy + sPx / 2
+  const cham = Math.min(16, Math.max(7, (sPx - dPx) * 0.32))
+  const tipC = Math.min(9, dPx * 0.11)
+
+  let threadFrac = 0.4
+  if (props.lengthMm != null && props.threadMm != null && props.lengthMm > 0 && props.threadMm > 0) {
+    threadFrac = Math.min(0.96, Math.max(0.08, props.threadMm / props.lengthMm))
+  }
+  const threadStart = headRight + (tipX - headRight) * (1 - threadFrac)
+  const fullThread = threadFrac > 0.92
+
+  const minor = props.minorMm != null && props.minorMm > 0 && props.minorMm < d ? props.minorMm : d * 0.85
+  const inset = Math.max(8, ((d - minor) / d) * dPx / 2)
+  const minorTop = shankTop + inset
+  const minorBot = shankBot - inset
+  const minorEnd = tipX - tipC - 4
+
+  const dimK = headBot + 30
+  const dimB = dimK + 34
+  const dimL = dimB + 34
+  const afterL = dimL + 20
+
+  const hexR = sPx / Math.sqrt(3)
+  const hexCx = 118
+  const hexCy = afterL + hexR + 10
+  const hexBot = hexCy + hexR
+  const dimS = hexBot + 26
+  const pW = 72
+  const pH = (Math.sqrt(3) / 2) * pW
+  const profileX = hexCx + sPx / 2 + 64
+  const rootY = Math.max(hexCy + 8, afterL + pH + 36)
+  const crestY = rootY - pH
+  const dimP = rootY + 28
+  const H = Math.max(dimS + 36, dimP + 28)
+  const bSpan = tipX - threadStart
+  const bTextX = bSpan >= 128 ? (threadStart + tipX) / 2 : threadStart - 8
+  const bAnchor = bSpan >= 128 ? "middle" : "end"
+  const bExtTop = threadStart < headRight + 140 ? dimK + 14 : shankBot + 5
+
+  const on = (id: string) => (props.hot === id ? "hotline" : "")
+  const tx = (id: string) => (props.hot === id ? "hot" : "")
+  const kLabel = props.kText ? `k ${props.kText}` : "k"
+  const sLabel = props.sText ? `s ${props.sText}` : "s"
+  const lLabel = props.lengthText ? `L ${props.lengthText}` : "L"
+  const bLabel = props.threadText ? `b ${props.threadText}` : "b"
+
+  const headPath = [
+    `M ${headLeft + cham} ${headTop}`,
+    `H ${headRight}`,
+    `V ${headBot}`,
+    `H ${headLeft + cham}`,
+    `L ${headLeft} ${headBot - cham}`,
+    `V ${headTop + cham}`,
+    "Z",
+  ].join(" ")
+
+  const shankPath = [
+    `M ${headRight} ${shankTop}`,
+    `H ${tipX - tipC}`,
+    `L ${tipX} ${shankTop + tipC}`,
+    `V ${shankBot - tipC}`,
+    `L ${tipX - tipC} ${shankBot}`,
+    `H ${headRight}`,
+    "Z",
+  ].join(" ")
+
+  const hex = hexPoints(hexCx, hexCy, sPx)
+  const flatBottom = hexCy + hexR / 2
+
+  return (
+    <div className="drawingFrame">
+      <svg className="boltSvg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Orthographic hex bolt, end view and thread profile">
+        <defs>
+          <marker id="boltArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 Z" fill="context-stroke" />
+          </marker>
+        </defs>
+
+        <path className={`line ${hasHead ? on("k") : "ghost"}`} d={headPath} />
+        <path className={`line ${on("d")}`} d={shankPath} />
+        <line className="center" x1={headLeft - 14} y1={cy} x2={tipX + 12} y2={cy} />
+        {minorEnd > threadStart + 6 ? (
+          <g className={`minor ${on("b")}`}>
+            <line x1={threadStart} y1={minorTop} x2={minorEnd} y2={minorTop} />
+            <line x1={threadStart} y1={minorBot} x2={minorEnd} y2={minorBot} />
+          </g>
+        ) : null}
+        {fullThread ? null : (
+          <line className={`minor ${on("b")}`} x1={threadStart} y1={shankTop} x2={threadStart} y2={shankBot} />
+        )}
+
+        <g className={on("k")}>
+          <line className="ext" x1={headLeft} y1={headBot + 5} x2={headLeft} y2={dimK + 5} />
+          <line className="ext" x1={headRight} y1={headBot + 5} x2={headRight} y2={dimL + 5} />
+          <line className="dim" x1={headLeft} y1={dimK} x2={headRight} y2={dimK} markerStart="url(#boltArrow)" markerEnd="url(#boltArrow)" />
+        </g>
+        <text className={tx("k")} x={headRight + 12} y={dimK - 6}>{hasHead ? kLabel : "k —"}</text>
+
+        <g className={on("b")}>
+          <line className="ext" x1={threadStart} y1={bExtTop} x2={threadStart} y2={dimB + 5} />
+          <line className="ext" x1={tipX} y1={shankBot + 5} x2={tipX} y2={dimL + 5} />
+          <line className="dim" x1={threadStart} y1={dimB} x2={tipX} y2={dimB} markerStart="url(#boltArrow)" markerEnd="url(#boltArrow)" />
+        </g>
+        <text className={tx("b")} x={bTextX} y={dimB - 7} textAnchor={bAnchor}>{bLabel}</text>
+
+        <g className={on("L")}>
+          <line className="dim" x1={headRight} y1={dimL} x2={tipX} y2={dimL} markerStart="url(#boltArrow)" markerEnd="url(#boltArrow)" />
+        </g>
+        <text className={tx("L")} x={(headRight + tipX) / 2} y={dimL - 7} textAnchor="middle">{lLabel}</text>
+
+        <g className={on("d")}>
+          <line className="ext" x1={tipX + 5} y1={shankTop} x2={tipX + 28} y2={shankTop} />
+          <line className="ext" x1={tipX + 5} y1={shankBot} x2={tipX + 28} y2={shankBot} />
+          <line className="dim" x1={tipX + 22} y1={shankTop} x2={tipX + 22} y2={shankBot} markerStart="url(#boltArrow)" markerEnd="url(#boltArrow)" />
+        </g>
+        <text className={tx("d")} x={tipX + 30} y={cy + 4}>d {props.dText}</text>
+
+        {hasHead ? (
+          <>
+            <polygon className={`line ${on("s")}`} points={hex} />
+            <circle className="line" cx={hexCx} cy={hexCy} r={dPx / 2} />
+            <line className="center" x1={hexCx - hexR - 8} y1={hexCy} x2={hexCx + hexR + 8} y2={hexCy} />
+            <line className="center" x1={hexCx} y1={hexCy - hexR - 8} x2={hexCx} y2={hexCy + hexR + 8} />
+            <g className={on("s")}>
+              <line className="ext" x1={hexCx - sPx / 2} y1={flatBottom + 4} x2={hexCx - sPx / 2} y2={dimS + 5} />
+              <line className="ext" x1={hexCx + sPx / 2} y1={flatBottom + 4} x2={hexCx + sPx / 2} y2={dimS + 5} />
+              <line className="dim" x1={hexCx - sPx / 2} y1={dimS} x2={hexCx + sPx / 2} y2={dimS} markerStart="url(#boltArrow)" markerEnd="url(#boltArrow)" />
+            </g>
+            <text className={tx("s")} x={hexCx} y={dimS + 16} textAnchor="middle">{sLabel}</text>
+          </>
+        ) : (
+          <>
+            <circle className="line ghost" cx={hexCx} cy={hexCy} r={dPx / 2} />
+            <text className="muted" x={hexCx} y={hexCy + dPx / 2 + 22} textAnchor="middle">Head not in dataset</text>
+          </>
+        )}
+
+        <g className={on("P")}>
+          <path className="line" d={`M ${profileX} ${rootY} L ${profileX + pW / 2} ${crestY} L ${profileX + pW} ${rootY}`} />
+          <line className="ext" x1={profileX} y1={rootY + 4} x2={profileX} y2={dimP + 5} />
+          <line className="ext" x1={profileX + pW} y1={rootY + 4} x2={profileX + pW} y2={dimP + 5} />
+          <line className="dim" x1={profileX} y1={dimP} x2={profileX + pW} y2={dimP} markerStart="url(#boltArrow)" markerEnd="url(#boltArrow)" />
+        </g>
+        <text className={tx("P")} x={profileX + pW / 2} y={crestY - 8} textAnchor="middle">60°</text>
+        <text className={tx("P")} x={profileX + pW + 12} y={dimP + 4}>P {props.pitchText}</text>
+      </svg>
+      <p className="drawingCaption">
+        Orthographic elevation, head end view and basic profile. Dimension lines sit outside the part.
+        Thread on the bolt is the simplified form (outline plus minor lines), not crossing diagonals.
+        L is the length under the head. b is the threaded length. Enter both and the thread is drawn to b/L.
+        Proportions follow d, s and k. Not a fabrication drawing.
+      </p>
+    </div>
+  )
+}
+
+function hexPoints(cx: number, cy: number, acrossFlats: number): string {
+  const radius = acrossFlats / Math.sqrt(3)
+  const pts: string[] = []
+  for (let i = 0; i < 6; i++) {
+    const angle = ((30 + i * 60) * Math.PI) / 180
+    pts.push(`${cx + radius * Math.cos(angle)},${cy - radius * Math.sin(angle)}`)
+  }
+  return pts.join(" ")
+}
+
+
+========================================================================
+FILE src/components/bolt-tool.tsx
+========================================================================
+
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react"
+import { BoltDiagram } from "./bolt-diagram.tsx"
+import { DrillPanel } from "./drill-panel.tsx"
+import { JointSketch } from "./joint-sketch.tsx"
+import { TorquePanel } from "./torque-panel.tsx"
+import { trimNum } from "../reference/format.ts"
+import {
+  STANDARDS,
+  classesFor,
+  standardById,
+} from "../bolts/database.ts"
+import {
+  buildSheet,
+  classOptions,
+  pitchOptions,
+  shareSlug,
+  sizeLabels,
+  type Selection,
+} from "../bolts/model.ts"
+import { STAINLESS_CLASSES, STAINLESS_NOTE } from "../bolts/materials.ts"
+import type { BoltQuery } from "../bolts/search.ts"
+
+const TABS = ["OVERVIEW", "GEOMETRY", "THREAD", "DRILL / TAP", "AREAS", "MATERIAL", "PRELOAD / TORQUE", "MASS", "SOURCE"] as const
+type Tab = (typeof TABS)[number]
+
+const BLANK = {
+  lengthMm: "",
+  threadedMm: "",
+  nn: "1",
+  nx: "0",
+  lj: "",
+  nStar: "",
+  vStar: "",
+  tp: "",
+  fup: "",
+  ae: "",
+  qty: "1",
+}
+
+export function BoltTool({ start, query }: { start: Selection; query: BoltQuery | null }) {
+  const [sel, setSel] = useState<Selection>(start)
+  const [fields, setFields] = useState(BLANK)
+  const [tab, setTab] = useState<Tab>("OVERVIEW")
+  const [hot, setHot] = useState<string | null>(null)
+  const [compare, setCompare] = useState<Selection[]>([])
+  const [copied, setCopied] = useState("")
+
+  useEffect(() => {
+    setSel(start)
+    if (query?.focus === "areas") setTab("AREAS")
+    else if (query?.focus === "material") setTab("MATERIAL")
+    else if (query?.focus === "mass") setTab("MASS")
+    else if (query?.focus === "thread") setTab("THREAD")
+    else if (query?.focus === "geometry") setTab("GEOMETRY")
+  }, [start, query])
+
+  const standard = standardById(sel.standardId) ?? STANDARDS[0]!
+  const sizes = sizeLabels(standard)
+  const pitches = pitchOptions(standard, sel.sizeLabel)
+  const dForClass = standard.system === "metric" ? Number(sel.sizeLabel.replace("M", "")) : 25.4
+  const classes = classOptions(standard, Number.isFinite(dForClass) ? dForClass : 20)
+
+  const sheet = useMemo(() => buildSheet({ ...sel, ...fields }), [sel, fields])
+
+  function patch(partial: Partial<Selection>) {
+    const next = { ...sel, ...partial }
+    const std = standardById(next.standardId)
+    if (!std) return
+    const labels = sizeLabels(std)
+    if (!labels.includes(next.sizeLabel)) next.sizeLabel = labels[0] ?? next.sizeLabel
+    const opts = pitchOptions(std, next.sizeLabel)
+    if (!opts.some((item) => Math.abs(item.pitchMm - next.pitchMm) < 1e-6)) {
+      next.pitchMm = opts[0]?.pitchMm ?? next.pitchMm
+    }
+    const d = std.system === "metric" ? Number(next.sizeLabel.slice(1)) : 20
+    const allowed = classOptions(std, d)
+    if (!allowed.includes(next.classId)) next.classId = allowed[0] ?? ""
+    setSel(next)
+  }
+
+  function setField(key: keyof typeof BLANK, value: string) {
+    setFields((prev) => ({ ...prev, [key]: value }))
+  }
+
+  async function copyLink() {
+    const slug = shareSlug(sel)
+    const url = `${window.location.origin}/bolts/${encodeURIComponent(slug)}`
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopied("Link copied")
+    } catch {
+      setCopied(url)
+    }
+  }
+
+  function onTabKey(event: KeyboardEvent) {
+    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return
+    event.preventDefault()
+    const index = TABS.indexOf(tab)
+    const next = event.key === "ArrowRight" ? (index + 1) % TABS.length : (index - 1 + TABS.length) % TABS.length
+    const item = TABS[next]
+    if (item) setTab(item)
+  }
+
+  const lengthMm = enteredMm(fields.lengthMm)
+  const threadMm = enteredMm(fields.threadedMm)
+
+  return (
+    <>
+      <div className="titleBlock">
+        <div className="tbLogo">IQEG</div>
+        <div className="tbMid">
+          <p className="tbKicker">IQEG REFERENCE LAB</p>
+          <h1 className="tbName">{sheet.designation}</h1>
+        </div>
+        <div className="tbMeta">
+          <span>IQ-REF-001</span>
+          <span>REV 0 · INDICATIVE</span>
+          <span>NOT A CERTIFICATE</span>
+        </div>
+      </div>
+      <div className="toolToolbar noPrint">
+        <button className="toolBtn ghost" type="button" onClick={() => window.print()}>PRINT SHEET</button>
+        <button className="toolBtn ghost" type="button" onClick={() => void copyLink()}>COPY LINK</button>
+        <button
+          className="toolBtn ghost"
+          type="button"
+          disabled={compare.length >= 4}
+          onClick={() => setCompare((prev) => (prev.length >= 4 ? prev : [...prev, sel]))}
+        >
+          ADD TO COMPARE
+        </button>
+        {copied ? <span className="toolNote">{copied}</span> : null}
+      </div>
+      {sheet.error ? <p className="failBanner">{sheet.error}</p> : null}
+      <div className="bench">
+        <div className="benchMain">
+        <section className="toolPanel">
+          <h2>Selection</h2>
+          <label className="field">
+            <span>STANDARD</span>
+            <select className="toolSelect" value={sel.standardId} onChange={(e) => patch({ standardId: e.target.value })}>
+              {STANDARDS.map((item) => (
+                <option key={item.id} value={item.id}>{item.family} — {item.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="fieldGrid compact">
+            <label className="field">
+              <span>SIZE</span>
+              <select className="toolSelect" value={sel.sizeLabel} onChange={(e) => patch({ sizeLabel: e.target.value })}>
+                {sizes.map((label) => <option key={label}>{label}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>PITCH</span>
+              <select
+                className="toolSelect"
+                value={String(sel.pitchMm)}
+                onChange={(e) => patch({ pitchMm: Number(e.target.value) })}
+              >
+                {pitches.map((item) => (
+                  <option key={item.label} value={item.pitchMm}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>PROPERTY CLASS</span>
+              <select className="toolSelect" value={sel.classId} onChange={(e) => patch({ classId: e.target.value })}>
+                {classes.length === 0 ? <option value="">Not in dataset</option> : null}
+                {classes.map((id) => <option key={id}>{id}</option>)}
+              </select>
+            </label>
+          </div>
+          <div className="fieldGrid compact">
+            <Num label="Length L — mm" value={fields.lengthMm} onChange={(v) => setField("lengthMm", v)} hot="L" setHot={setHot} />
+            <Num label="Thread length b — mm" value={fields.threadedMm} onChange={(v) => setField("threadedMm", v)} hot="b" setHot={setHot} />
+            <Num label="Quantity" value={fields.qty} onChange={(v) => setField("qty", v)} />
+          </div>
+          <p className="toolNote">L is under the head. b is the threaded part of L. Leave both blank if you only need the size. Quantity is for the mass total only.</p>
+        </section>
+        <CheckPanel placement="diagram" sheet={sheet} fields={fields} setField={setField} standardName={standard.name} hot={hot} setHot={setHot} />
+        </div>
+        <div className="benchSide">
+        <section className="toolPanel">
+          <div className="toolTabs" role="tablist" onKeyDown={onTabKey}>
+            {TABS.map((item) => (
+              <button key={item} type="button" role="tab" aria-selected={tab === item} className={tab === item ? "on" : ""} onClick={() => setTab(item)}>
+                {item}
+              </button>
+            ))}
+          </div>
+          <TabBody tab={tab} sheet={sheet} hot={hot} setHot={setHot} classIds={classesFor(standard)} classId={sel.classId} />
+        </section>
+        <CheckPanel placement="fields" sheet={sheet} fields={fields} setField={setField} standardName={standard.name} hot={hot} setHot={setHot} />
+        </div>
+      </div>
+      <section className="toolPanel" style={{ marginTop: 14 }}>
+        <h2>Figure</h2>
+        <p className="toolNote" style={{ marginTop: 0 }}>Identification only. Head sizes are typical, not the standard minimum and maximum.</p>
+        <div className="figureRow figureFixed">
+          <BoltDiagram
+            hot={hot}
+            dText={sheet.profile ? `${trimNum(sheet.dMm, 3)} mm` : "—"}
+            pitchText={sheet.profile ? `${trimNum(sheet.pitchMm, 3)} mm` : "—"}
+            kText={sheet.hex ? `${trimNum(sheet.hex.k, 2)} mm` : null}
+            sText={sheet.hex ? `${trimNum(sheet.hex.s, 2)} mm` : null}
+            lengthText={lengthMm == null ? null : `${trimNum(lengthMm, 2)} mm`}
+            threadText={threadMm == null ? null : `${trimNum(threadMm, 2)} mm`}
+            dMm={sheet.dMm}
+            kMm={sheet.hex?.k ?? null}
+            sMm={sheet.hex?.s ?? null}
+            minorMm={sheet.profile?.d1 ?? null}
+            lengthMm={lengthMm}
+            threadMm={threadMm}
+          />
+          {sheet.profile ? (
+            <div className="resultList">
+              <Pair label="d" value={`${trimNum(sheet.dMm, 3)} mm`} dim="d" hot={hot} setHot={setHot} />
+              <Pair label="P" value={`${trimNum(sheet.pitchMm, 3)} mm`} dim="P" hot={hot} setHot={setHot} />
+              <Pair label="As" value={`${trimNum(sheet.profile.As, 1)} mm²`} dim="As" hot={hot} setHot={setHot} />
+              <Pair label="s across flats" value={sheet.hex ? `${trimNum(sheet.hex.s, 2)} mm` : "—"} dim="s" hot={hot} setHot={setHot} />
+              <Pair label="k head height" value={sheet.hex ? `${trimNum(sheet.hex.k, 2)} mm` : "—"} dim="k" hot={hot} setHot={setHot} />
+              <Pair label="fy" value={sheet.band ? `${sheet.band.fy} MPa` : "—"} />
+              <Pair label="fu" value={sheet.band ? `${sheet.band.fu} MPa` : "—"} />
+            </div>
+          ) : null}
+        </div>
+      </section>
+      {compare.length > 0 ? <Compare rows={compare} onClear={() => setCompare([])} fields={fields} /> : null}
+    </>
+  )
+}
+
+function enteredMm(raw: string): number | null {
+  if (!raw.trim()) return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n
+}
+
+function Num({ label, value, onChange, hot, setHot, hint }: { label: string; value: string; onChange: (v: string) => void; hot?: string; setHot?: (v: string | null) => void; hint?: string }) {
+  return (
+    <label className="field" onMouseEnter={() => hot && setHot?.(hot)} onMouseLeave={() => setHot?.(null)}>
+      <span>{label}</span>
+      <input className="toolField" inputMode="decimal" value={value} onFocus={() => hot && setHot?.(hot)} onBlur={() => setHot?.(null)} onChange={(e) => onChange(e.target.value)} />
+      {hint ? <small>{hint}</small> : null}
+    </label>
+  )
+}
+
+function CheckPanel({ placement, sheet, fields, setField, standardName, hot, setHot }: { placement: "diagram" | "fields"; sheet: ReturnType<typeof buildSheet>; fields: typeof BLANK; setField: (key: keyof typeof BLANK, value: string) => void; standardName: string; hot: string | null; setHot: (v: string | null) => void }) {
+  const cap = sheet.capacity
+  const threadPlanes = Number(fields.nn)
+  const shankPlanes = Number(fields.nx)
+  if (placement === "diagram") {
+    return (
+      <section className="toolPanel">
+        <h2>Joint</h2>
+        <JointSketch
+          hot={hot}
+          threadPlanes={Number.isFinite(threadPlanes) ? threadPlanes : 0}
+          shankPlanes={Number.isFinite(shankPlanes) ? shankPlanes : 0}
+          endOn={fields.ae.trim() !== ""}
+        />
+      </section>
+    )
+  }
+  return (
+    <section className="toolPanel">
+      <h2>AS 4100 check</h2>
+      <p className="toolNote" style={{ marginTop: 0 }}>
+        Bearing-type bolt only — not a friction-grip slip check, and not a certificate.
+        Hover a field. The joint on the left marks that part. Classes 4.6, 8.8 and 10.9 only.
+      </p>
+      <div className="fieldGrid compact">
+        <Num label="Applied tension N* — kN" value={fields.nStar} onChange={(v) => setField("nStar", v)} hint="Design tension on this one bolt. Not the capacity." hot="N" setHot={setHot} />
+        <Num label="Applied shear V* — kN" value={fields.vStar} onChange={(v) => setField("vStar", v)} hint="Design shear on this one bolt." hot="V" setHot={setHot} />
+        <Num label="Shear planes in the thread" value={fields.nn} onChange={(v) => setField("nn", v)} hint="A single lap with the nut on the thread is usually 1." hot="nn" setHot={setHot} />
+        <Num label="Shear planes in the shank" value={fields.nx} onChange={(v) => setField("nx", v)} hint="Same single lap is usually 0. Use 1 only if the cut is on the plain shank." hot="nx" setHot={setHot} />
+        <Num label="Lap length — mm" value={fields.lj} onChange={(v) => setField("lj", v)} hint="First shear plane to last. Blank means no reduction. Past 300 mm the shear capacity drops." hot="lj" setHot={setHot} />
+      </div>
+      <details className="toolGloss">
+        <summary>PLATE IN FRONT OF THE BOLT</summary>
+        <div className="inner">
+          <p className="toolNote" style={{ marginTop: 0 }}>Skip this unless you are checking the ply. Thickness and plate tensile strength are both required. End distance is optional. If ae is blank, tear-out is not checked.</p>
+          <div className="fieldGrid compact">
+            <Num label="Plate thickness — mm" value={fields.tp} onChange={(v) => setField("tp", v)} hint="tp of the ply being crushed." hot="t" setHot={setHot} />
+            <Num label="Plate tensile strength — MPa" value={fields.fup} onChange={(v) => setField("fup", v)} hint="fup of that ply, not the bolt." />
+            <Num label="End distance ae — mm" value={fields.ae} onChange={(v) => setField("ae", v)} hint="The distance your edition puts in ae × tp × fup. Blank skips tear-out." hot="ae" setHot={setHot} />
+          </div>
+        </div>
+      </details>
+      {!cap || !cap.ok ? (
+        <p className="failBanner" style={{ marginTop: 12 }}>
+          {cap && !cap.ok && cap.reason.includes("Outside implemented")
+            ? `${standardName} has no AS 4100 check on this sheet. The geometry above is still valid. Use ISO metric, AS 1110, AS 1111, AS 1252 or the AS 4100 context, class 4.6, 8.8 or 10.9.`
+            : cap && !cap.ok
+              ? cap.reason
+              : "No design result for this combination."}
+        </p>
+      ) : (
+        <>
+          <div className="resultList" style={{ marginTop: 12 }}>
+            <Pair label="Tension capacity φNtf" value={`${trimNum(cap.phiNtf_kN, 2)} kN`} />
+            <Pair label="Shear capacity φVf" value={`${trimNum(cap.phiVf_kN, 2)} kN`} />
+            <Pair label="Plate capacity φVb" value={cap.phiVb_kN == null ? "not checked" : `${trimNum(cap.phiVb_kN, 2)} kN`} />
+            <Pair label="Tension used" value={cap.utilN == null ? "no N* entered" : `${trimNum(cap.utilN * 100, 1)}%`} fail={cap.utilN != null && cap.utilN > 1} />
+            <Pair label="Bolt shear used" value={cap.utilV == null ? "no V* entered" : `${trimNum(cap.utilV * 100, 1)}%`} fail={cap.utilV != null && cap.utilV > 1} />
+            <Pair label="Plate used" value={cap.utilPly == null ? "—" : `${trimNum(cap.utilPly * 100, 1)}%`} fail={cap.utilPly != null && cap.utilPly > 1} />
+            <Pair label="Combined shear and tension" value={cap.utilInteract == null ? "needs both N* and V*" : `${trimNum(cap.utilInteract * 100, 1)}%`} fail={cap.utilInteract != null && cap.utilInteract > 1} />
+            <Pair label="What governs" value={cap.governing} />
+          </div>
+          <p className="toolNote">
+            Over 100% is past this check. Bolt factor φ is 0.80. Plate factor is 0.90 and is not mixed into the bolt factor.
+            A thread plane uses the stress area. A shank plane uses the shank area. Shear is taken as 0.62 of fu, then lap factor {trimNum(cap.kr, 3)} and 10.9 factor {trimNum(cap.krd, 2)}.
+          </p>
+          <details className="toolGloss">
+            <summary>SHOW THE ARITHMETIC</summary>
+            <div className="inner">
+              <div className="toolTableWrap">
+                <table className="toolTable">
+                  <thead><tr><th>Step</th><th>Equation</th><th>Substitution</th><th>Result</th></tr></thead>
+                  <tbody>
+                    {cap.steps.map((step) => (
+                      <tr key={step.id}>
+                        <td>{step.label}</td>
+                        <td>{step.equation}</td>
+                        <td>{step.substitution}</td>
+                        <td>{step.result}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+        </>
+      )}
+    </section>
+  )
+}
+
+function Pair({ label, value, dim, hot, setHot, fail = false }: { label: string; value: string; dim?: string; hot?: string | null; setHot?: (v: string | null) => void; fail?: boolean }) {
+  const on = dim != null && hot === dim
+  return (
+    <div onMouseEnter={() => dim && setHot?.(dim)} onMouseLeave={() => setHot?.(null)}>
+      <span className={on ? "hotLabel" : ""}>{label}</span>
+      <b className={fail ? "fail" : ""}>{value}</b>
+    </div>
+  )
+}
+
+function TabBody({ tab, sheet, hot, setHot, classIds, classId }: { tab: Tab; sheet: ReturnType<typeof buildSheet>; hot: string | null; setHot: (v: string | null) => void; classIds: string[] | "all"; classId: string }) {
+  const p = sheet.profile
+  if (tab === "OVERVIEW") {
+    return (
+      <>
+        <p className="toolNote">{sheet.standardNote}</p>
+        {p ? (
+          <div className="resultList">
+            <Pair label="Designation" value={sheet.designation} />
+            <Pair label="d" value={`${trimNum(sheet.dMm, 3)} mm`} dim="d" hot={hot} setHot={setHot} />
+            <Pair label="P" value={`${trimNum(sheet.pitchMm, 3)} mm`} dim="P" hot={hot} setHot={setHot} />
+            <Pair label="As" value={`${trimNum(p.As, 2)} mm²`} />
+            <Pair label="Ao" value={`${trimNum(p.Ao, 2)} mm²`} />
+            <Pair label="Ar" value={`${trimNum(p.Ar, 2)} mm²`} />
+            <Pair label="fy" value={sheet.band ? `${sheet.band.fy} MPa` : "Required standard data unavailable."} />
+            <Pair label="fu" value={sheet.band ? `${sheet.band.fu} MPa` : "Required standard data unavailable."} />
+            <Pair label="Sp" value={sheet.band ? `${sheet.band.sp} MPa` : "—"} />
+          </div>
+        ) : <p className="failBanner">This combination is not contained in the current verified dataset.</p>}
+      </>
+    )
+  }
+  if (tab === "GEOMETRY") {
+    return (
+      <>
+        {sheet.hex ? (
+          <div className="resultList">
+            <Pair label="s across flats" value={`${trimNum(sheet.hex.s, 2)} mm`} dim="s" hot={hot} setHot={setHot} />
+            <Pair label="e across corners" value={`${trimNum(sheet.hex.e, 2)} mm`} />
+            <Pair label="k head height" value={`${trimNum(sheet.hex.k, 2)} mm`} dim="k" hot={hot} setHot={setHot} />
+            <Pair label="Grip L − b" value={sheet.gripMm == null ? "—" : `${trimNum(sheet.gripMm, 2)} mm`} dim="b" hot={hot} setHot={setHot} />
+            <Pair label="Rough allowance, not ISO 273" value={sheet.holeMm == null ? "—" : `${trimNum(sheet.holeMm, 1)} mm`} />
+          </div>
+        ) : <p className="failBanner">Required standard data unavailable. Head dimensions are not in the verified dataset for this size.</p>}
+        <p className="toolNote">{sheet.hexProvenance.note} Across corners e = s / cos(30°) is the regular-hexagon geometry, not the standard minimum e.</p>
+        <p className="toolNote">{sheet.gripNote}</p>
+        <p className="toolNote">{sheet.holeNote} The ISO 273 clearance holes are on DRILL / TAP. Nut thickness and washer size are not embedded.</p>
+      </>
+    )
+  }
+  if (tab === "THREAD" && p) {
+    return (
+      <div className="resultList">
+        <Pair label="Designation" value={sheet.designation} />
+        <Pair label="Pitch P" value={`${trimNum(p.P, 4)} mm`} dim="P" hot={hot} setHot={setHot} />
+        <Pair label="Threads / mm" value={trimNum(1 / p.P, 4)} />
+        <Pair label="TPI" value={trimNum(sheet.tpi ?? 0, 3)} />
+        <Pair label="Major d" value={`${trimNum(p.d, 3)} mm`} dim="d" hot={hot} setHot={setHot} />
+        <Pair label="Pitch dia d2" value={`${trimNum(p.d2, 3)} mm`} />
+        <Pair label="Minor d1" value={`${trimNum(p.d1, 3)} mm`} />
+        <Pair label="d3" value={`${trimNum(p.d3, 3)} mm`} />
+        <Pair label="Height H" value={`${trimNum(p.H, 3)} mm`} />
+        <Pair label="Depth 5H/8" value={`${trimNum(p.depth, 3)} mm`} />
+        <Pair label="Angle" value="60°" />
+        <Pair label="Class" value="6g / 6H usual — deviations not embedded" />
+      </div>
+    )
+  }
+  if (tab === "DRILL / TAP") return <DrillPanel sheet={sheet} />
+  if (tab === "AREAS" && p) {
+    return (
+      <>
+        <div className="formulaBox">
+          <b>CALCULATED</b>
+          <p>Ao = πd²/4 = {trimNum(p.Ao, 2)} mm²</p>
+          <p>As = π/4 ((d2+d3)/2)² = {trimNum(p.As, 2)} mm²</p>
+          <p>Ar = πd1²/4 = {trimNum(p.Ar, 2)} mm²</p>
+        </div>
+        <div className="resultList">
+          <Pair label="Shank shear Ao" value={`${trimNum(p.shearShank, 2)} mm² · ${trimNum(p.shearShank / 100, 4)} cm² · ${trimNum(p.shearShank / 645.16, 5)} in²`} />
+          <Pair label="Thread shear As" value={`${trimNum(p.shearThread, 2)} mm² · ${trimNum(p.shearThread / 100, 4)} cm² · ${trimNum(p.shearThread / 645.16, 5)} in²`} />
+          <Pair label="Root area Ar" value={`${trimNum(p.Ar, 2)} mm² · ${trimNum(p.Ar / 100, 4)} cm² · ${trimNum(p.Ar / 645.16, 5)} in²`} />
+        </div>
+        <p className="toolNote">{sheet.areaNote}</p>
+      </>
+    )
+  }
+  if (tab === "MATERIAL") {
+    if (!sheet.band) return <p className="failBanner">Required standard data unavailable.</p>
+    return (
+      <>
+        <div className="resultList">
+          <Pair label="Class" value={sheet.title} />
+          <Pair label="fu" value={`${sheet.band.fu} MPa`} />
+          <Pair label="fy" value={`${sheet.band.fy} MPa`} />
+          <Pair label="Proof stress Sp" value={`${sheet.band.sp} MPa`} />
+          <Pair label="Proof load Sp·As" value={p ? `${trimNum((sheet.band.sp * p.As) / 1000, 2)} kN` : "—"} />
+        </div>
+        <p className="toolNote">{sheet.classNote} fy, fu and proof stress are different properties.</p>
+        <p className="toolNote">{sheet.classProvenance.note} Hardness and elongation are not in this dataset. Classes on this standard: {classIds === "all" ? "all ISO classes in the dataset" : classIds.join(", ") || "none"}.</p>
+        <h2 style={{ marginTop: 16 }}>Stainless fastener classes — reference only</h2>
+        <p className="toolNote" style={{ marginTop: 0 }}>{STAINLESS_NOTE}</p>
+        <div className="toolTableWrap">
+          <table className="toolTable">
+            <thead><tr><th>Class</th><th>Family</th><th>rm min MPa</th><th>Rp0.2 min MPa</th><th>Commercial name</th></tr></thead>
+            <tbody>
+              {STAINLESS_CLASSES.map((item) => (
+                <tr key={item.id}><td>{item.id}</td><td>{item.family}</td><td>{item.rm}</td><td>{item.rp}</td><td>{item.common}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="toolNote">AS/NZS 1252 is a product and assembly standard. AS 4100 is the design check. This sheet does not treat them as the same document. ASTM, SAE and high-temperature fastener tables are not in this dataset.</p>
+      </>
+    )
+  }
+  if (tab === "PRELOAD / TORQUE") return <TorquePanel sheet={sheet} classId={classId} />
+  if (tab === "MASS") {
+    return (
+      <>
+        {sheet.massKg == null ? <p className="failBanner">{sheet.massNote}</p> : (
+          <div className="resultList">
+            <Pair label="Each" value={`${trimNum((sheet.massEachG ?? 0), 1)} g`} />
+            <Pair label="Each" value={`${trimNum((sheet.massEachG ?? 0) / 1000, 4)} kg`} />
+            <Pair label="Total" value={`${trimNum(sheet.massKg, 4)} kg`} />
+            <Pair label="per 100" value={sheet.massEachG ? `${trimNum(sheet.massEachG / 10, 2)} kg` : "—"} />
+            <Pair label="per 1000" value={sheet.massEachG ? `${trimNum(sheet.massEachG, 1)} kg` : "—"} />
+          </div>
+        )}
+        <p className="toolNote">{sheet.massNote} Nut mass and washer mass: required standard data unavailable.</p>
+      </>
+    )
+  }
+  return (
+    <>
+      <div className="resultList">
+        <Pair label="Profile" value={sheet.profileProvenance.sourceType} />
+        <Pair label="Standard" value={sheet.profileProvenance.sourceStandard} />
+        <Pair label="Clause" value={sheet.profileProvenance.clause} />
+        <Pair label="Class data" value={sheet.classProvenance.sourceType} />
+        <Pair label="Head data" value={sheet.hex ? sheet.hexProvenance.sourceType : "unavailable"} />
+        <Pair label="Dataset" value="Fastener DB v1.0.0" />
+        <Pair label="Engine" value="v1.0.0" />
+      </div>
+      <p className="toolNote">{sheet.profileProvenance.note}</p>
+      <p className="toolNote">{sheet.standardNote}</p>
+    </>
+  )
+}
+
+function Compare({ rows, onClear, fields }: { rows: Selection[]; onClear: () => void; fields: typeof BLANK }) {
+  const sheets = rows.map((row) => buildSheet({ ...fields, ...row, nStar: "", vStar: "", nn: "1", nx: "0", lj: "" }))
+  const nums = sheets.map((sheet) => ({
+    label: sheet.designation,
+    Ao: sheet.profile?.Ao ?? null,
+    As: sheet.profile?.As ?? null,
+    Ar: sheet.profile?.Ar ?? null,
+    P: sheet.pitchMm,
+    fy: sheet.band?.fy ?? null,
+    fu: sheet.band?.fu ?? null,
+    sp: sheet.band?.sp ?? null,
+    mass: sheet.massEachG,
+  }))
+  const keys = ["Ao", "As", "Ar", "P", "fy", "fu", "sp", "mass"] as const
+  return (
+    <section className="toolPanel spanAll" style={{ marginTop: 14 }}>
+      <h2>Comparison</h2>
+      <p className="toolNote">Largest is marked black, smallest grey, only where the numbers differ. That is not a selection.</p>
+      <div className="toolTableWrap">
+        <table className="toolTable">
+          <thead>
+            <tr>
+              <th>Bolt</th><th>Ao</th><th>As</th><th>Ar</th><th>P</th><th>fy</th><th>fu</th><th>Sp</th><th>g each</th>
+            </tr>
+          </thead>
+          <tbody>
+            {nums.map((row) => (
+              <tr key={row.label}>
+                <td>{row.label}</td>
+                {keys.map((key) => {
+                  const value = row[key]
+                  const column = nums.map((item) => item[key]).filter((item): item is number => item != null)
+                  const max = Math.max(...column)
+                  const min = Math.min(...column)
+                  const mark = value == null || max === min ? "" : value === max ? "hi" : value === min ? "lo" : ""
+                  return <td key={key} className={mark}>{value == null ? "—" : trimNum(value, key === "P" ? 3 : 1)}</td>
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button className="toolBtn ghost" type="button" onClick={onClear} style={{ marginTop: 10 }}>CLEAR COMPARE</button>
+    </section>
+  )
+}
+
+
+========================================================================
+FILE src/components/command-bar.tsx
+========================================================================
+
+import { useNavigate } from "@tanstack/react-router"
+import { useState } from "react"
+import { routeQuery } from "../reference/query.ts"
+import { useLabQuery } from "./lab-shell.tsx"
+
+export function CommandBar({ initial = "" }: { initial?: string }) {
+  const navigate = useNavigate()
+  const { embed } = useLabQuery()
+  const [text, setText] = useState(initial)
+  const [miss, setMiss] = useState("")
+
+  function go() {
+    const hit = routeQuery(text)
+    if (hit.module === "bolts") {
+      setMiss("")
+      void navigate({ to: "/bolts", search: embed ? { q: hit.q, embed: "1" } : { q: hit.q } })
+      return
+    }
+    if (hit.module === "units") {
+      setMiss("")
+      void navigate({ to: "/units", search: embed ? { q: hit.q, embed: "1" } : { q: hit.q } })
+      return
+    }
+    if (hit.module === "plate") {
+      setMiss("")
+      void navigate({ to: "/plate", search: embed ? { embed: "1" } : {} })
+      return
+    }
+    setMiss("Not recognised. Try M24 8.8, 350 MPa, or plate buckling.")
+  }
+
+  return (
+    <form
+      className="command"
+      onSubmit={(event) => {
+        event.preventDefault()
+        go()
+      }}
+    >
+      <input
+        className="refSearch"
+        aria-label="Reference search"
+        placeholder='M24 8.8    ·    350 MPa    ·    1450 rpm    ·    3/4 UNC'
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setText("")
+            setMiss("")
+          }
+        }}
+      />
+      <button className="toolBtn" type="submit">OPEN</button>
+      {miss ? <p className="failBanner spanAll">{miss}</p> : null}
+    </form>
+  )
+}
+
+
+========================================================================
+FILE src/components/drill-panel.tsx
+========================================================================
+
+import { useState } from "react"
+import { clearanceHoles, CLEARANCE_NOTE } from "../bolts/clearance.ts"
+import { PIPE_THREADS, PIPE_WARNING, type PipeFamily } from "../bolts/pipeThreads.ts"
+import { drawingCallout, engagementLength, tapDrill } from "../bolts/tap.ts"
+import { trimNum } from "../reference/format.ts"
+import { buildSheet } from "../bolts/model.ts"
+
+export function DrillPanel({ sheet }: { sheet: ReturnType<typeof buildSheet> }) {
+  const [percent, setPercent] = useState("75")
+  const [fuInternal, setFuInternal] = useState("")
+  const [family, setFamily] = useState<PipeFamily | "">("")
+  const [pipeId, setPipeId] = useState("")
+  const [copied, setCopied] = useState("")
+  const profile = sheet.profile
+  if (!profile) return <p className="failBanner">No thread geometry for this selection.</p>
+
+  const pct = Number(percent)
+  let drill: ReturnType<typeof tapDrill> | null = null
+  let drillError = ""
+  try {
+    if (percent.trim()) drill = tapDrill(sheet.dMm, sheet.pitchMm, pct)
+  } catch (error) {
+    drillError = error instanceof Error ? error.message : "Invalid percentage."
+  }
+  const holes = clearanceHoles(sheet.dMm)
+  const callout = drawingCallout(sheet.dMm, sheet.pitchMm, holes?.medium ?? null)
+  const fuBolt = sheet.band?.fu ?? null
+  const fuTap = fuInternal.trim() ? Number(fuInternal) : fuBolt
+  let engagement: ReturnType<typeof engagementLength> | null = null
+  let engagementError = ""
+  if (fuBolt && fuTap && Number.isFinite(fuTap)) {
+    try {
+      engagement = engagementLength(profile.As, sheet.dMm, fuBolt, fuTap)
+    } catch (error) {
+      engagementError = error instanceof Error ? error.message : "Invalid engagement."
+    }
+  }
+  const pipes = PIPE_THREADS.filter((item) => item.family === family)
+  const pipe = pipes.find((item) => item.id === pipeId) ?? null
+
+  async function copy(text: string) {
+    await navigator.clipboard.writeText(text)
+    setCopied(text)
+  }
+
+  return (
+    <>
+      <p className="toolNote" style={{ marginTop: 0 }}>
+        External thread is the bolt. Internal thread is the tapped hole. Clearance holes are for the bolt to pass through, not to be tapped.
+      </p>
+      <div className="resultList">
+        <div><span>Designation</span><b>M{trimNum(sheet.dMm, 3)} × {trimNum(sheet.pitchMm, 3)}</b></div>
+        <div><span>Major d</span><b>{trimNum(profile.d, 3)} mm</b></div>
+        <div><span>Pitch</span><b>{trimNum(profile.P, 3)} mm</b></div>
+        <div><span>Pitch diameter d2</span><b>{trimNum(profile.d2, 3)} mm</b></div>
+        <div><span>Basic minor d1</span><b>{trimNum(profile.d1, 3)} mm</b></div>
+        <div><span>Series</span><b>{sheet.series}</b></div>
+      </div>
+      <label className="field" style={{ marginTop: 12 }}>
+        <span>Thread height to aim for — %</span>
+        <input className="toolField" inputMode="decimal" value={percent} onChange={(e) => setPercent(e.target.value)} />
+        <small>100% meets the basic minor diameter. 75% is a common workshop aim. This is calculated, not a drill chart.</small>
+      </label>
+      {drillError ? <p className="failBanner">{drillError}</p> : null}
+      {drill ? (
+        <div className="resultList">
+          <div><span>Calculated drill</span><b>{trimNum(drill.drillMm, 2)} mm</b></div>
+          <div><span>Shop estimate d − P</span><b>{trimNum(drill.shopEstimateMm, 2)} mm</b></div>
+          <div><span>Basic minor</span><b>{trimNum(drill.basicMinorMm, 2)} mm</b></div>
+        </div>
+      ) : null}
+      <p className="toolNote">{drill?.note} Use the nearest drill you hold. This list is not rounded to a stock drill.</p>
+      <h2 style={{ marginTop: 16 }}>Clearance holes</h2>
+      {holes ? (
+        <div className="resultList">
+          <div><span>Close — fine series</span><b>Ø{trimNum(holes.fine, 1)} mm</b></div>
+          <div><span>Normal — medium series</span><b>Ø{trimNum(holes.medium, 1)} mm</b></div>
+          <div><span>Large — coarse series</span><b>Ø{trimNum(holes.coarse, 1)} mm</b></div>
+        </div>
+      ) : <p className="failBanner">No ISO 273 nominal for this diameter. Inch clearance holes are not in this dataset.</p>}
+      <p className="toolNote">{CLEARANCE_NOTE} Countersink and counterbore sizes are not in this dataset.</p>
+      <h2 style={{ marginTop: 16 }}>Engagement</h2>
+      <label className="field">
+        <span>Tapped-part tensile strength — MPa</span>
+        <input className="toolField" inputMode="decimal" value={fuInternal} placeholder={fuBolt ? `Blank uses the bolt, ${fuBolt}` : "Not available"} onChange={(e) => setFuInternal(e.target.value)} />
+        <small>Leave blank to assume the tapped part matches the bolt. Steel into aluminium needs the aluminium strength, not the bolt.</small>
+      </label>
+      {engagementError ? <p className="failBanner">{engagementError}</p> : null}
+      {engagement ? (
+        <div className="resultList">
+          <div><span>Calculated length</span><b>{trimNum(engagement.lengthMm, 1)} mm</b></div>
+          <div><span>Rule of thumb, steel</span><b>{trimNum(engagement.ruleOfThumbMm, 1)} mm</b></div>
+        </div>
+      ) : <p className="toolNote">No bolt tensile strength, so the calculated length is not returned. The one-diameter rule of thumb is still only a rule of thumb.</p>}
+      {engagement ? <p className="toolNote">{engagement.note}</p> : null}
+      <h2 style={{ marginTop: 16 }}>Drawing callout</h2>
+      <div className="resultList">
+        <div><span>External</span><b>{callout.external}</b></div>
+        <div><span>Tapped hole</span><b>{callout.internal}</b></div>
+        <div><span>Clearance, medium</span><b>{callout.clearance ?? "—"}</b></div>
+      </div>
+      <div className="toolToolbar">
+        <button className="toolBtn ghost" type="button" onClick={() => void copy(callout.internal)}>COPY TAPPED HOLE</button>
+        <button className="toolBtn ghost" type="button" onClick={() => void copy(callout.external)}>COPY EXTERNAL</button>
+        {callout.clearance ? <button className="toolBtn ghost" type="button" onClick={() => void copy(callout.clearance!)}>COPY HOLE</button> : null}
+      </div>
+      {copied ? <p className="toolNote">Copied {copied}</p> : null}
+      <p className="toolNote">{callout.note}</p>
+      <h2 style={{ marginTop: 16 }}>Pipe threads</h2>
+      <p className="toolNote" style={{ marginTop: 0 }}>{PIPE_WARNING}</p>
+      <div className="fieldGrid compact">
+        <label className="field">
+          <span>Family</span>
+          <select className="toolSelect" value={family} onChange={(e) => { setFamily(e.target.value as PipeFamily | ""); setPipeId("") }}>
+            <option value="">Select</option>
+            <option value="NPT">NPT — tapered, 60°</option>
+            <option value="BSPT">BSPT — tapered, 55°</option>
+            <option value="BSPP">BSPP / G — parallel, 55°</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Nominal size</span>
+          <select className="toolSelect" value={pipeId} onChange={(e) => setPipeId(e.target.value)}>
+            <option value="">Select</option>
+            {pipes.map((item) => <option key={item.id} value={item.id}>{item.nominal} — {item.tpi} TPI</option>)}
+          </select>
+        </label>
+      </div>
+      {pipe ? (
+        <div className="resultList">
+          <div><span>Standard</span><b>{pipe.standard}</b></div>
+          <div><span>Angle</span><b>{pipe.angleDeg}°</b></div>
+          <div><span>Form</span><b>{pipe.taper}</b></div>
+          <div><span>External</span><b>{pipe.externalName}</b></div>
+          <div><span>Internal</span><b>{pipe.internalName}</b></div>
+          <div><span>Sealing</span><b>{pipe.seal}</b></div>
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+
+========================================================================
+FILE src/components/joint-sketch.tsx
+========================================================================
+
+type Props = {
+  hot: string | null
+  threadPlanes: number
+  shankPlanes: number
+  endOn: boolean
+}
+
+type Mode = "thread" | "shank" | "double"
+
+/**
+ * One SVG section through a lap joint. Labels stay in the margins.
+ * Heavy arrows are applied actions. Thin arrows are dimensions.
+ */
+export function JointSketch({ hot, threadPlanes, shankPlanes, endOn }: Props) {
+  const on = (id: string) => (hot === id ? "hot" : "")
+  const planes = threadPlanes + shankPlanes
+  const mode: Mode = planes >= 2 ? "double" : shankPlanes > 0 && threadPlanes === 0 ? "shank" : "thread"
+  const threadAtJoint = mode !== "shank"
+  const g = mode === "double" ? doubleGeom() : singleGeom()
+  const thread = threadSpan(mode, threadPlanes, shankPlanes, g)
+  const aeText = endOn ? "ae" : "ae NOT CHECKED"
+
+  return (
+    <div>
+      <div className="drawingFrame jointFrame">
+        <svg className="jointSvg" viewBox="0 0 660 520" role="img" aria-label="Section through a bolted lap joint">
+          <defs>
+            <marker id="jLoad" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+              <path d="M0 0.4 L12 6 L0 11.6 Z" fill="#111" />
+            </marker>
+            <marker id="jDim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0 1.4 L9 5 L0 8.6 Z" fill="#111" />
+            </marker>
+          </defs>
+
+          <text className="cap" x="12" y="22">{mode === "double" ? "TWO SHEAR PLANES — NOT TO SCALE" : "SINGLE SHEAR LAP — NOT TO SCALE"}</text>
+
+          {g.plates.map((plate) => (
+            <Hatch key={plate.id} id={plate.id} box={plate} holeL={g.holeL} holeR={g.holeR} hot={on("t")} />
+          ))}
+
+          <g className={on("d")}>
+            <path className="bolt" d={nutPath(g.nut)} />
+            <path className="bolt" d={headPath(g.head)} />
+            <Shank xL={g.shankL} xR={g.shankR} y0={g.head.y + g.head.h} y1={g.nut.y + g.nut.h - 4} thread0={thread.y0} thread1={thread.y1} />
+            <line className="center" x1={g.cx} y1={g.head.y + 10} x2={g.cx} y2={g.nut.y + g.nut.h - 8} />
+          </g>
+
+          <g className={on(threadAtJoint ? "nn" : "nx")}>
+            {g.shears.map((y) => (
+              <line key={y} className="shear" x1={g.shearL} y1={y} x2={g.shearR} y2={y} />
+            ))}
+          </g>
+
+          <g className={`action ${on("V")}`}>
+            <line x1={g.vTop.x2} y1={g.vTop.y} x2={g.vTop.x1} y2={g.vTop.y} markerEnd="url(#jLoad)" />
+            <text x={g.vTop.labelX} y={g.vTop.labelY}>V*</text>
+            <line x1={g.vBot.x1} y1={g.vBot.y} x2={g.vBot.x2} y2={g.vBot.y} markerEnd="url(#jLoad)" />
+            <text x={g.vBot.labelX} y={g.vBot.labelY}>V*</text>
+          </g>
+          <g className={`action ${on("N")}`}>
+            <line x1={g.cx} y1={g.head.y - 6} x2={g.cx} y2={30} markerEnd="url(#jLoad)" />
+            <text x={g.cx + 12} y={46}>N*</text>
+            <line x1={g.nDownX} y1={g.nut.y + g.nut.h + 10} x2={g.nDownX} y2={g.nut.y + g.nut.h + 52} markerEnd="url(#jLoad)" />
+            <text x={g.nDownX - 28} y={g.nut.y + g.nut.h + 40}>N*</text>
+          </g>
+
+          <g className={on("t")}>
+            <line className="witness" x1={g.plates[0]!.x} y1={g.plates[0]!.y + 3} x2={g.tX + 8} y2={g.plates[0]!.y + 3} />
+            <line className="witness" x1={g.plates[0]!.x} y1={g.plates[0]!.y + g.plates[0]!.h - 3} x2={g.tX + 8} y2={g.plates[0]!.y + g.plates[0]!.h - 3} />
+            <line className="dim" x1={g.tX} y1={g.plates[0]!.y + 8} x2={g.tX} y2={g.plates[0]!.y + g.plates[0]!.h - 8} markerStart="url(#jDim)" markerEnd="url(#jDim)" />
+            <text x={g.tX - 16} y={(g.plates[0]!.y + g.plates[0]!.y + g.plates[0]!.h) / 2 + 4}>t</text>
+          </g>
+
+          <g className={on("lj")}>
+            <line className="witness" x1={g.lj.x1} y1={g.lj.y0} x2={g.lj.x1} y2={g.lj.y - 8} />
+            <line className="witness" x1={g.lj.x2} y1={g.lj.y0} x2={g.lj.x2} y2={g.lj.y - 8} />
+            <line className="tick" x1={g.lj.x2} y1={g.lj.tick0} x2={g.lj.x2} y2={g.lj.tick1} />
+            <line className="dim" x1={g.lj.x1 + 4} y1={g.lj.y} x2={g.lj.x2 - 4} y2={g.lj.y} markerStart="url(#jDim)" markerEnd="url(#jDim)" />
+            <text x={(g.lj.x1 + g.lj.x2) / 2 - 8} y={g.lj.y - 8}>lj</text>
+          </g>
+
+          <g className={on("ae")}>
+            <line className="witness" x1={g.cx} y1={g.ae.break0} x2={g.cx} y2={g.ae.break1} />
+            <line className="witness" x1={g.cx} y1={g.ae.break2} x2={g.cx} y2={g.ae.y - 8} />
+            <line className="witness" x1={g.ae.x2} y1={g.ae.y0} x2={g.ae.x2} y2={g.ae.y - 8} />
+            <line className="dim" x1={g.cx + 4} y1={g.ae.y} x2={g.ae.x2 - 4} y2={g.ae.y} markerStart="url(#jDim)" markerEnd="url(#jDim)" />
+            <text x={(g.cx + g.ae.x2) / 2 - aeText.length * 4.2} y={g.ae.y - 10}>{aeText}</text>
+          </g>
+
+          <Leader x={12} y={96} text="PLATE 1" x2={g.plates[0]!.x + 28} y2={g.plates[0]!.y + 4} hot={on("t")} />
+          <Leader x={12} y={g.shears[0]! + 4} text="INTERFACE" x2={g.plates[0]!.x - 4} y2={g.shears[0]!} hot={on(threadAtJoint ? "nn" : "nx")} />
+          <Leader x={12} y={thread.labelY} text={thread.label} x2={thread.x2} y2={thread.y2} kneeX={thread.kneeX} kneeY={thread.kneeY} hot={on(thread.hot)} />
+          {thread.plainLabel ? (
+            <Leader x={12} y={thread.plainY} text="PLAIN SHANK" x2={g.shankL} y2={thread.plainTarget} hot={on("nx")} />
+          ) : null}
+          <Leader x={12} y={g.nut.y + 22} text="NUT" x2={g.nut.x} y2={g.nut.y + 16} hot={on("d")} />
+          <Leader x={548} y={78} text="HEAD" x2={g.head.x + g.head.w} y2={g.head.y + 18} hot={on("d")} />
+          <Leader x={548} y={g.shears[0]! - 14} text="HOLE" x2={g.holeR} y2={g.shears[0]! - 10} hot={on("d")} />
+          <Leader x={548} y={g.shears[0]! + 18} text={g.shears.length > 1 ? "SHEAR PLANES" : "SHEAR PLANE"} x2={g.shearR} y2={g.shears[0]!} hot={on(threadAtJoint ? "nn" : "nx")} />
+          <Leader x={548} y={g.plates[1]!.y + g.plates[1]!.h / 2 + 4} text="PLATE 2" x2={g.plates[1]!.x + g.plates[1]!.w} y2={g.plates[1]!.y + g.plates[1]!.h / 2} hot={on("t")} />
+          <text className="cap" x="12" y="508">HEAVY ARROW = APPLIED ACTION    THIN ARROW = DIMENSION</text>
+        </svg>
+      </div>
+      <div className="caseRow">
+        <Case title="Thread in shear" on={mode === "thread"} />
+        <Case title="Shank in shear" on={mode === "shank"} />
+        <Case title="Two planes" on={mode === "double"} />
+      </div>
+    </div>
+  )
+}
+
+type Box = { x: number; y: number; w: number; h: number }
+
+type Geom = {
+  plates: { id: string; x: number; y: number; w: number; h: number }[]
+  holeL: number
+  holeR: number
+  shankL: number
+  shankR: number
+  cx: number
+  head: Box
+  nut: Box
+  shears: number[]
+  shearL: number
+  shearR: number
+  tX: number
+  vTop: { x1: number; x2: number; y: number; labelX: number; labelY: number }
+  vBot: { x1: number; x2: number; y: number; labelX: number; labelY: number }
+  nDownX: number
+  lj: { x1: number; x2: number; y: number; y0: number; tick0: number; tick1: number }
+  ae: { x2: number; y: number; y0: number; break0: number; break1: number; break2: number }
+}
+
+function singleGeom(): Geom {
+  const p1 = { id: "p1", x: 188, y: 104, w: 236, h: 52 }
+  const p2 = { id: "p2", x: 300, y: 196, w: 246, h: 52 }
+  const p1b = p1.y + p1.h
+  const p2b = p2.y + p2.h
+  const holeL = 352
+  const holeR = 408
+  const shankL = 364
+  const shankR = 396
+  const cx = 380
+  const head = { x: 338, y: 56, w: 84, h: 48 }
+  const nut = { x: 346, y: p2b, w: 68, h: 36 }
+  const shear = (p1b + p2.y) / 2
+  return {
+    plates: [p1, p2],
+    holeL, holeR, shankL, shankR, cx, head, nut,
+    shears: [shear],
+    shearL: p1.x + 8,
+    shearR: p2.x + p2.w - 36,
+    tX: 170,
+    vTop: { x1: p1.x + 8, x2: head.x - 24, y: head.y + 28, labelX: p1.x + 36, labelY: head.y + 20 },
+    vBot: { x1: nut.x + nut.w + 16, x2: p2.x + p2.w - 16, y: p2b + 18, labelX: nut.x + nut.w + 28, labelY: p2b + 10 },
+    nDownX: p2.x - 28,
+    lj: { x1: p2.x, x2: p1.x + p1.w, y: 368, y0: p2b + 8, tick0: p1b + 2, tick1: p2.y - 2 },
+    ae: { x2: p2.x + p2.w, y: 448, y0: p2b + 8, break0: nut.y + nut.h + 8, break1: 352, break2: 384 },
+  }
+}
+
+function doubleGeom(): Geom {
+  const top = { id: "p1", x: 188, y: 96, w: 220, h: 42 }
+  const mid = { id: "p2", x: 300, y: 158, w: 246, h: 64 }
+  const bot = { id: "p3", x: 188, y: 242, w: 220, h: 42 }
+  const holeL = 352
+  const holeR = 408
+  const shankL = 364
+  const shankR = 396
+  const cx = 380
+  const head = { x: 338, y: 52, w: 84, h: 44 }
+  const nut = { x: 346, y: 284, w: 68, h: 32 }
+  return {
+    plates: [top, mid, bot],
+    holeL, holeR, shankL, shankR, cx, head, nut,
+    shears: [148, 232],
+    shearL: 200,
+    shearR: 520,
+    tX: 170,
+    vTop: { x1: 196, x2: 310, y: 78, labelX: 236, labelY: 70 },
+    vBot: { x1: 440, x2: 530, y: 308, labelX: 468, labelY: 300 },
+    nDownX: 292,
+    lj: { x1: 300, x2: 408, y: 410, y0: 292, tick0: 138, tick1: 154 },
+    ae: { x2: 546, y: 488, y0: 292, break0: 324, break1: 396, break2: 424 },
+  }
+}
+
+function threadSpan(mode: Mode, nn: number, nx: number, g: Geom) {
+  const gripTop = g.head.y + g.head.h + 8
+  const nutTop = g.nut.y + 4
+  const nutBot = g.nut.y + g.nut.h - 8
+  if (mode === "shank") {
+    return {
+      y0: nutTop,
+      y1: nutBot,
+      label: "PLAIN SHANK",
+      labelY: 236,
+      x2: g.shankL,
+      y2: g.shears[0]! + 10,
+      kneeX: 176,
+      kneeY: g.shears[0]! + 10,
+      hot: "nx",
+      plainLabel: false,
+      plainY: 0,
+      plainTarget: 0,
+    }
+  }
+  if (mode === "double" && nn > 0 && nx > 0) {
+    const split = g.shears[1]! - 16
+    return {
+      y0: gripTop,
+      y1: split,
+      label: "THREADED PORTION",
+      labelY: 214,
+      x2: g.shankL,
+      y2: g.shears[0]! + 10,
+      kneeX: 176,
+      kneeY: g.shears[0]! + 10,
+      hot: "nn",
+      plainLabel: true,
+      plainY: g.shears[1]! - 2,
+      plainTarget: g.shears[1]! - 8,
+    }
+  }
+  return {
+    y0: gripTop,
+    y1: nutBot,
+    label: "THREADED PORTION",
+    labelY: mode === "double" ? 214 : 236,
+    x2: g.shankL,
+    y2: g.shears[0]! + 10,
+    kneeX: 176,
+    kneeY: g.shears[0]! + 10,
+    hot: "nn",
+    plainLabel: false,
+    plainY: 0,
+    plainTarget: 0,
+  }
+}
+
+function headPath(h: Box) {
+  return `M ${h.x} ${h.y + 8} L ${h.x + 8} ${h.y} H ${h.x + h.w - 8} L ${h.x + h.w} ${h.y + 8} V ${h.y + h.h} H ${h.x} Z`
+}
+
+function nutPath(n: Box) {
+  return `M ${n.x} ${n.y} H ${n.x + n.w} L ${n.x + n.w - 8} ${n.y + n.h} H ${n.x + 8} Z`
+}
+
+function platePath(b: { x: number; y: number; w: number; h: number }, holeL: number, holeR: number) {
+  const x2 = b.x + b.w
+  const y2 = b.y + b.h
+  return `M ${b.x} ${b.y} H ${x2} V ${y2} H ${b.x} Z M ${holeL} ${b.y} H ${holeR} V ${y2} H ${holeL} Z`
+}
+
+function Hatch({ id, box, holeL, holeR, hot }: { id: string; box: { x: number; y: number; w: number; h: number }; holeL: number; holeR: number; hot: string }) {
+  const d = platePath(box, holeL, holeR)
+  const lines = []
+  for (let i = -box.h; i < box.w + box.h; i += 8) {
+    lines.push(<line key={i} x1={box.x + i} y1={box.y} x2={box.x + i - box.h} y2={box.y + box.h} />)
+  }
+  return (
+    <g className={hot}>
+      <clipPath id={id}><path d={d} fillRule="evenodd" /></clipPath>
+      <path className="plate" d={d} fillRule="evenodd" />
+      <g className="hatch" clipPath={`url(#${id})`}>{lines}</g>
+    </g>
+  )
+}
+
+function Shank({ xL, xR, y0, y1, thread0, thread1 }: { xL: number; xR: number; y0: number; y1: number; thread0: number; thread1: number }) {
+  const depth = 5
+  const t0 = Math.max(y0, Math.min(thread0, y1))
+  const t1 = Math.max(t0, Math.min(thread1, y1))
+  const crests = []
+  for (let y = t0; y < t1 - 2; y += 10) {
+    const yb = Math.min(y + 10, t1)
+    const mid = (y + yb) / 2
+    crests.push(<path key={`L${y}`} className="bolt" d={`M ${xL + depth} ${y} L ${xL} ${mid} L ${xL + depth} ${yb} Z`} />)
+    crests.push(<path key={`R${y}`} className="bolt" d={`M ${xR - depth} ${y} L ${xR} ${mid} L ${xR - depth} ${yb} Z`} />)
+  }
+  return (
+    <g>
+      {t0 > y0 ? <rect className="bolt" x={xL} y={y0} width={xR - xL} height={t0 - y0} /> : null}
+      {t1 > t0 ? <rect className="bolt" x={xL + depth} y={t0} width={xR - xL - depth * 2} height={t1 - t0} /> : null}
+      {crests}
+      {y1 > t1 ? <rect className="bolt" x={xL} y={t1} width={xR - xL} height={y1 - t1} /> : null}
+    </g>
+  )
+}
+
+function Leader({ x, y, text, x2, y2, hot, kneeX, kneeY }: { x: number; y: number; text: string; x2: number; y2: number; hot: string; kneeX?: number; kneeY?: number }) {
+  const width = text.length * 8.6
+  const toTheRight = x2 >= x + width
+  const startX = toTheRight ? x + width + 8 : x - 8
+  const startY = y - 4
+  const points = kneeX == null ? `${startX},${startY} ${x2},${y2}` : `${startX},${startY} ${kneeX},${kneeY ?? startY} ${x2},${y2}`
+  return (
+    <g className={hot}>
+      <polyline className="leader" points={points} />
+      <circle className="dot" cx={x2} cy={y2} r="2.2" />
+      <text x={x} y={y}>{text}</text>
+    </g>
+  )
+}
+
+function Case({ title, on }: { title: string; on: boolean }) {
+  return <p className={on ? "caseChip on" : "caseChip"}>{title}</p>
+}
+
+
+========================================================================
+FILE src/components/lab-shell.tsx
+========================================================================
+
+import { Link, useRouterState } from "@tanstack/react-router"
+import type { ReactNode } from "react"
+import { DATASET_VERSION, DISCLAIMER, ENGINE_VERSION } from "../reference/version.ts"
+
+export function useLabQuery() {
+  const searchStr = useRouterState({ select: (s) => s.location.searchStr })
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const params = new URLSearchParams(searchStr)
+  return {
+    embed: params.get("embed") === "1",
+    q: params.get("q") ?? "",
+    pathname,
+    search: params.get("embed") === "1" ? { embed: "1" } : {},
+  }
+}
+
+export function labHref(path: string, embed: boolean, q?: string) {
+  const params = new URLSearchParams()
+  if (embed) params.set("embed", "1")
+  if (q) params.set("q", q)
+  const s = params.toString()
+  return s ? `${path}?${s}` : path
+}
+
+type Props = {
+  kicker: string
+  title: string
+  lede: string
+  ident: string
+  rev: string
+  compact?: boolean
+  children: ReactNode
+}
+
+export function LabShell({ kicker, title, lede, ident, rev, compact, children }: Props) {
+  const { embed, pathname } = useLabQuery()
+  return (
+    <div className={embed ? "isEmbed" : undefined}>
+      {embed ? null : (
+        <header className="labBar">
+          <Link to="/" className="labMark">IQEG</Link>
+          <p>ENGINEERING REFERENCE LAB</p>
+          <nav className="labNav">
+            <Link to="/" className={pathname === "/" ? "on" : ""}>LAB</Link>
+            <Link to="/plate" className={pathname.startsWith("/plate") ? "on" : ""}>PLATE</Link>
+            <Link to="/bolts" className={pathname.startsWith("/bolts") ? "on" : ""}>BOLTS</Link>
+            <Link to="/units" className={pathname.startsWith("/units") ? "on" : ""}>UNITS</Link>
+            <a href="/as4100-review.txt" download="as4100-review.txt">DOWNLOAD REVIEW TEXT</a>
+            <span className="labVer">ENG {ENGINE_VERSION}</span>
+          </nav>
+        </header>
+      )}
+      <section className={compact ? "pageHero pageHeroCompact" : "pageHero"}>
+        <p>{kicker}</p>
+        <h1>{title}</h1>
+        <p>{lede}</p>
+        <div className="pageHeroLine">
+          <span>{ident}</span>
+          <span>{rev}</span>
+          <span>NOT A CERTIFICATE</span>
+          <Link to="/">ALL REFERENCES</Link>
+        </div>
+      </section>
+      <section className="drawingOffice">
+        <div className="printOnly">
+          <p>IQEG ENGINEERING REFERENCE LAB · {ident} · ENGINE {ENGINE_VERSION} · DATA {DATASET_VERSION}</p>
+          <h1>{title}</h1>
+        </div>
+        {children}
+        <aside className="toolWarning">
+          <b>ENGINEERING NOTE</b>
+          {DISCLAIMER} Engine v{ENGINE_VERSION}. Fastener DB v{DATASET_VERSION}.
+        </aside>
+      </section>
+    </div>
+  )
+}
+
+
+========================================================================
+FILE src/components/mode-view.tsx
+========================================================================
+
+import { useEffect, useRef, useState } from "react"
+import type { FemMode } from "../plate/fem.ts"
+
+type Props = {
+  xs: number[]
+  ys: number[]
+  modes: FemMode[]
+  modeIndex: number
+  onMode: (index: number) => void
+}
+
+export function ModeView({ xs, ys, modes, modeIndex, onMode }: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [yaw, setYaw] = useState(-0.7)
+  const [pitch, setPitch] = useState(0.65)
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [scale, setScale] = useState(0.22)
+  const [meshOn, setMeshOn] = useState(true)
+  const [contourOn, setContourOn] = useState(true)
+  const [outlineOn, setOutlineOn] = useState(true)
+  const drag = useRef<{ x: number; y: number; yaw: number; pitch: number; pan: { x: number; y: number }; button: number } | null>(null)
+  const [tick, setTick] = useState(0)
+  const mode = modes[modeIndex]
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const observer = new ResizeObserver(() => setTick((value) => value + 1))
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+    const width = canvas.clientWidth
+    const height = canvas.clientHeight
+    const ratio = window.devicePixelRatio || 1
+    canvas.width = Math.max(1, Math.floor(width * ratio))
+    canvas.height = Math.max(1, Math.floor(height * ratio))
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
+    ctx.fillStyle = "#f6f4ee"
+    ctx.fillRect(0, 0, width, height)
+    if (!mode || xs.length < 2 || ys.length < 2 || mode.w.length !== xs.length * ys.length) {
+      ctx.fillStyle = "#111"
+      ctx.font = "14px 'IBM Plex Mono', monospace"
+      ctx.fillText("Run FEM to calculate a mode shape.", 16, 28)
+      return
+    }
+    const a = xs[xs.length - 1] ?? 1
+    const b = ys[ys.length - 1] ?? 1
+    const amp = scale * Math.min(a, b)
+    const fit = Math.min(width, height) / Math.max(a, b) * 0.72 * zoom
+    const project = (x: number, y: number, z: number) => {
+      const X = x - a / 2
+      const Y = y - b / 2
+      const cy = Math.cos(yaw)
+      const sy = Math.sin(yaw)
+      const x1 = X * cy - Y * sy
+      const y1 = X * sy + Y * cy
+      const cp = Math.cos(pitch)
+      const sp = Math.sin(pitch)
+      const y2 = y1 * cp - z * sp
+      const z2 = y1 * sp + z * cp
+      return { x: width / 2 + pan.x + x1 * fit, y: height / 2 + pan.y - z2 * fit, depth: y2 }
+    }
+    const nx = xs.length
+    const ny = ys.length
+    const point = (ix: number, iy: number, deformed: boolean) => {
+      const w = deformed ? (mode.w[iy * nx + ix] ?? 0) * amp : 0
+      return project(xs[ix] ?? 0, ys[iy] ?? 0, w)
+    }
+    if (contourOn) {
+      const faces: { depth: number; pts: { x: number; y: number }[]; shade: number }[] = []
+      for (let iy = 0; iy < ny - 1; iy++) {
+        for (let ix = 0; ix < nx - 1; ix++) {
+          const corners = [point(ix, iy, true), point(ix + 1, iy, true), point(ix + 1, iy + 1, true), point(ix, iy + 1, true)]
+          const depth = corners.reduce((sum, p) => sum + p.depth, 0) / 4
+          const wAvg = [0, 1, 2, 3].reduce((sum, _k, index) => {
+            const cx = index === 1 || index === 2 ? ix + 1 : ix
+            const cy = index >= 2 ? iy + 1 : iy
+            return sum + Math.abs(mode.w[cy * nx + cx] ?? 0)
+          }, 0) / 4
+          faces.push({ depth, pts: corners, shade: wAvg })
+        }
+      }
+      faces.sort((p, q) => q.depth - p.depth)
+      for (const face of faces) {
+        const grey = Math.round(244 - face.shade * 150)
+        ctx.beginPath()
+        ctx.moveTo(face.pts[0]!.x, face.pts[0]!.y)
+        for (const p of face.pts.slice(1)) ctx.lineTo(p.x, p.y)
+        ctx.closePath()
+        ctx.fillStyle = `rgb(${grey},${grey},${Math.max(210, grey - 8)})`
+        ctx.fill()
+      }
+    }
+    if (meshOn) {
+      ctx.strokeStyle = "#111"
+      ctx.lineWidth = 0.6
+      ctx.beginPath()
+      for (let iy = 0; iy < ny; iy++) {
+        for (let ix = 0; ix < nx; ix++) {
+          const p = point(ix, iy, true)
+          if (ix + 1 < nx) {
+            const q = point(ix + 1, iy, true)
+            ctx.moveTo(p.x, p.y)
+            ctx.lineTo(q.x, q.y)
+          }
+          if (iy + 1 < ny) {
+            const q = point(ix, iy + 1, true)
+            ctx.moveTo(p.x, p.y)
+            ctx.lineTo(q.x, q.y)
+          }
+        }
+      }
+      ctx.stroke()
+    }
+    if (outlineOn) {
+      ctx.strokeStyle = "#111"
+      ctx.setLineDash([5, 4])
+      ctx.lineWidth = 1.1
+      ctx.beginPath()
+      const corners = [point(0, 0, false), point(nx - 1, 0, false), point(nx - 1, ny - 1, false), point(0, ny - 1, false)]
+      ctx.moveTo(corners[0]!.x, corners[0]!.y)
+      for (const p of corners.slice(1)) ctx.lineTo(p.x, p.y)
+      ctx.closePath()
+      ctx.stroke()
+      ctx.setLineDash([])
+    }
+    ctx.fillStyle = "#111"
+    ctx.font = "12px 'IBM Plex Mono', monospace"
+    ctx.fillText("NORMALISED EIGENMODE — DISPLAY SCALE IS NOT PHYSICAL DISPLACEMENT", 12, height - 14)
+  }, [xs, ys, mode, yaw, pitch, zoom, pan, scale, meshOn, contourOn, outlineOn, tick])
+
+  return (
+    <div>
+      <p className="toolNote">Positive eigenvalues only. The shape is the Lanczos eigenvector, not a substituted sine. Negative partners stay in the solver note.</p>
+      <div className="toolTabs" role="tablist">
+        {modes.map((item, index) => (
+          <button key={item.lambda + index} type="button" className={modeIndex === index ? "on" : ""} onClick={() => onMode(index)}>
+            MODE {index + 1}
+          </button>
+        ))}
+      </div>
+      <canvas
+        ref={canvasRef}
+        className="modeCanvas"
+        aria-label="Buckling mode shape from the calculated eigenvector"
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId)
+          drag.current = { x: event.clientX, y: event.clientY, yaw, pitch, pan, button: event.shiftKey ? 2 : event.button }
+        }}
+        onPointerMove={(event) => {
+          const start = drag.current
+          if (!start) return
+          const dx = event.clientX - start.x
+          const dy = event.clientY - start.y
+          if (start.button === 2 || event.shiftKey) setPan({ x: start.pan.x + dx, y: start.pan.y + dy })
+          else {
+            setYaw(start.yaw + dx * 0.01)
+            setPitch(Math.max(-1.2, Math.min(1.2, start.pitch + dy * 0.01)))
+          }
+        }}
+        onPointerUp={() => { drag.current = null }}
+        onWheel={(event) => {
+          event.preventDefault()
+          setZoom((value) => Math.max(0.4, Math.min(4, value * (event.deltaY > 0 ? 0.92 : 1.08))))
+        }}
+      />
+      <div className="toolToolbar">
+        <label className="field"><span>Display scale</span><input className="toolField" type="range" min={0.04} max={0.6} step={0.01} value={scale} onChange={(event) => setScale(Number(event.target.value))} /></label>
+        <button type="button" className="toolBtn" onClick={() => setMeshOn((v) => !v)}>{meshOn ? "MESH ON" : "MESH OFF"}</button>
+        <button type="button" className="toolBtn" onClick={() => setContourOn((v) => !v)}>{contourOn ? "CONTOUR ON" : "CONTOUR OFF"}</button>
+        <button type="button" className="toolBtn" onClick={() => setOutlineOn((v) => !v)}>{outlineOn ? "OUTLINE ON" : "OUTLINE OFF"}</button>
+      </div>
+      <p className="toolNote">Drag to rotate. Shift-drag to pan. Scroll to zoom. The shape is the calculated eigenvector, normalised so the largest |w| is 1.</p>
+      {mode ? <p className="toolNote">λ = {mode.lambda.toExponential(3)}{mode.sigma1CrMpa != null ? ` · σ1,cr = ${mode.sigma1CrMpa.toFixed(2)} MPa` : ""}</p> : null}
+    </div>
+  )
+}

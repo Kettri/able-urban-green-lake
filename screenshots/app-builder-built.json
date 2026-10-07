@@ -1,0 +1,40 @@
+{
+  "url": "http://127.0.0.1:8081/plate",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "IQEG Reference Lab",
+      "hasCanvas": false,
+      "bodyTextLen": 3883,
+      "bodyTextHash": "deb28eceed9f166e4d8ee6a7e2acb1d50d3e34fa4395800729ce0377d9b803a1",
+      "bodyTextPrefix": "IQEG ENGINEERING REFERENCE LAB LAB PLATE BOLTS UNITS ENG 1.0.0 I",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "IQEG Reference Lab",
+      "hasCanvas": false,
+      "bodyTextLen": 3847,
+      "bodyTextHash": "6c5290c6fa0844b143ff21a6bb9963ff1275a9c28982c65fff9332b0429005ee",
+      "bodyTextPrefix": "IQEG LAB PLATE BOLTS UNITS IQEG / PLATE STABILITY Plate and pane",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [
+    "BRAND NOTE: no custom public/og.jpg — the platform will serve the og.grok.me placeholder. Custom cards are the default for games of every kind (DOM board/word games included), whimsical apps, creative tools, and brand-forward pages — only plain utilities (converters, CRUD trackers, admin dashboards) keep the placeholder. If this app is not a plain utility, finish the brand-asset pass per /workspace/.grok/skills/og/SKILL.md."
+  ],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}

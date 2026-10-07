@@ -1,0 +1,3706 @@
+IQ-CAL-PLB WHOLE APP — PART 4 OF 6
+Plain text. Read this file directly. Do not unzip, download, or browse.
+This pack is the engineering website: plate buckling, bolts, units, and the pages that show them.
+Elastic plate engine IQ-PLB-E1.0. AS 4100 plate/web subset IQ-PLB-AS4100-D1.0.
+Not included: node_modules, package-lock, the copyrighted standard PDF, and the Grok preview-host login code.
+
+
+========================================================================
+FILE src/plate/benchmarks.ts
+========================================================================
+
+import { classicalPlate, kShear, kUniform, type Edges } from "./classical.ts"
+import { countHalfWaves, solvePlateFem, type FemInput, type FemResult } from "./fem.ts"
+import { forceToN, lengthToMm, stressToMpa } from "./units.ts"
+
+const SS: Edges = { x0: "ss", x1: "ss", y0: "ss", y1: "ss" }
+const steel = { eMpa: 210000, nu: 0.3, fyMpa: 350, fuMpa: 450 }
+
+export type VerifyStatus = "pass" | "fail" | "limited" | "not-verified"
+
+export type VerifyRow = {
+  id: string
+  title: string
+  expected: string
+  actual: string
+  difference: string
+  tolerance: string
+  mesh: string
+  residual: string
+  basis: string
+  status: VerifyStatus
+}
+
+function pct(got: number, reference: number): number {
+  return (100 * (got - reference)) / Math.abs(reference)
+}
+
+function stressFromK(k: number, e: number, nu: number, t: number, b: number): number {
+  return (k * Math.PI ** 2 * e * (t / b) ** 2) / (12 * (1 - nu * nu))
+}
+
+function fem(input: Partial<FemInput>): FemResult {
+  return solvePlateFem(Object.assign({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3,
+    sigma1Mpa: 0, psi: 1, tauMpa: 0, nx: 8, ny: 8,
+    edges: SS, krNPerRadPerMm: 0, shapes: false, modes: 2,
+  }, input))
+}
+
+function num(value: number | null | undefined, digits = 2): string {
+  return value == null || !Number.isFinite(value) ? "—" : value.toFixed(digits)
+}
+
+export function runVerification(): VerifyRow[] {
+  const rows: VerifyRow[] = []
+  const push = (row: VerifyRow) => rows.push(row)
+
+  const squareRef = stressFromK(4, 210000, 0.3, 10, 1000)
+  const square = fem({ aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 12, ny: 12, shapes: true, modes: 2 })
+  const squareGot = square.modes[0]?.sigma1CrMpa ?? null
+  const squarePct = squareGot == null ? null : pct(squareGot, squareRef)
+  const squareWaves = square.ok ? countHalfWaves(square.modes[0]?.w ?? [], square.xs, square.ys, "x") : 0
+  push({
+    id: "V01",
+    title: "Square uniform compression",
+    expected: `${squareRef.toFixed(2)} MPa · kσ = 4 · 1 half-wave`,
+    actual: squareGot == null ? square.reason : `${squareGot.toFixed(2)} MPa · half-waves ${squareWaves}`,
+    difference: squarePct == null ? "—" : `${squarePct.toFixed(2)}%`,
+    tolerance: "1% and 1 half-wave",
+    mesh: "12×12",
+    residual: square.residual.toExponential(2),
+    basis: "Navier kσ = 4. Mindlin, not forced onto Kirchhoff. A b/t study moves this gap toward zero as the plate gets thinner.",
+    status: squarePct != null && Math.abs(squarePct) <= 1 && squareWaves === 1 && square.residual < 1e-6 ? "pass" : "fail",
+  })
+
+  const longRef = stressFromK(4, 210000, 0.3, 10, 1000)
+  const long = fem({ aMm: 2000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 16, ny: 8, shapes: true })
+  const longGot = long.modes[0]?.sigma1CrMpa ?? null
+  const longPct = longGot == null ? null : pct(longGot, longRef)
+  const longWaves = long.ok ? countHalfWaves(long.modes[0]?.w ?? [], long.xs, long.ys, "x") : 0
+  const classicalLong = kUniform(2)
+  push({
+    id: "V02",
+    title: "Rectangular compression α = 2",
+    expected: `${longRef.toFixed(2)} MPa · m = ${classicalLong.m}`,
+    actual: longGot == null ? long.reason : `${longGot.toFixed(2)} MPa · half-waves ${longWaves}`,
+    difference: longPct == null ? "—" : `${longPct.toFixed(2)}%`,
+    tolerance: "1.5% and m = 2",
+    mesh: "16×8",
+    residual: long.residual.toExponential(2),
+    basis: "Same kσ = 4 with the half-wave that minimises k. Aspect search is V03.",
+    status: longPct != null && Math.abs(longPct) <= 1.5 && longWaves === 2 && classicalLong.m === 2 ? "pass" : "fail",
+  })
+
+  const aspects = [0.5, 1, 2, 4].map((alpha) => {
+    const theory = kUniform(alpha)
+    const expectM = alpha <= 1 ? 1 : alpha
+    return `${alpha}: m=${theory.m}/${expectM}`
+  })
+  const aspectOk = [0.5, 1, 2, 4].every((alpha) => kUniform(alpha).m === (alpha <= 1 ? 1 : alpha))
+  push({
+    id: "V03",
+    title: "Aspect-ratio half-wave search",
+    expected: "m = 1, 1, 2, 4 for α = 0.5, 1, 2, 4",
+    actual: aspects.join(" · "),
+    difference: "—",
+    tolerance: "exact m",
+    mesh: "analytical",
+    residual: "—",
+    basis: "k(m) = (m/α + α/m)² minimised for m = 1…8. Independent of the FEM mesh.",
+    status: aspectOk ? "pass" : "fail",
+  })
+
+  const bendClassical = classicalPlate({ aMm: 5000, bMm: 1000, tMm: 10, ...steel, sigma1Mpa: 100, psi: -1, tauMpa: 0, edges: SS })
+  const bend = fem({ aMm: 5000, bMm: 1000, tMm: 10, sigma1Mpa: 100, psi: -1, tauMpa: 0, nx: 60, ny: 21, modes: 2 })
+  const bendGot = bend.modes[0]?.sigma1CrMpa ?? null
+  const bendRef = bendClassical.sigmaCrMpa
+  const bendPct = bendGot != null && bendRef != null ? pct(bendGot, bendRef) : null
+  const bendTight = bendPct != null && Math.abs(bendPct) <= 1
+  push({
+    id: "V04",
+    title: "Pure bending ψ = −1",
+    expected: bendRef == null ? "—" : `${bendRef.toFixed(2)} MPa · kσ = ${num(bendClassical.kSigma, 2)} (target 23.9)`,
+    actual: bendGot == null ? bend.reason : `${bendGot.toFixed(2)} MPa`,
+    difference: bendPct == null ? "—" : `${bendPct.toFixed(2)}%`,
+    tolerance: "1% of the Galerkin value. Residual target 1e-8.",
+    mesh: "60×21",
+    residual: bend.residual.toExponential(2),
+    basis: "Navier–Galerkin for four simple supports. The ±λ cluster is real: on this mesh the next positive eigenvalue sits about 0.36% higher. Lanczos on L⁻¹ Kg L⁻ᵀ resolves that cluster. The residual target is the eigenpair, not a tuned stress.",
+    status: !bendTight ? "fail" : bend.residual < 1e-6 ? "pass" : "limited",
+  })
+
+  const shearK = kShear(1)
+  const shearRef = stressFromK(shearK, 210000, 0.3, 8, 800)
+  const shear = fem({ aMm: 800, bMm: 800, tMm: 8, sigma1Mpa: 0, psi: 1, tauMpa: 1, nx: 24, ny: 24, modes: 2 })
+  const shearGot = shear.modes[0]?.tauCrMpa ?? null
+  const shearPct = shearGot == null ? null : pct(shearGot, shearRef)
+  const kFem = shearGot == null ? null : shearK * (shearGot / shearRef)
+  push({
+    id: "V05",
+    title: "Pure shear — Timoshenko fit",
+    expected: `APPROXIMATE / FIT kτ = ${shearK.toFixed(2)} · ${shearRef.toFixed(2)} MPa`,
+    actual: shearGot == null ? shear.reason : `${shearGot.toFixed(2)} MPa · FEM kτ = ${num(kFem, 2)}`,
+    difference: shearPct == null ? "—" : `${shearPct.toFixed(2)}%`,
+    tolerance: "1.5% of the fit, not an exact series",
+    mesh: "24×24",
+    residual: shear.residual.toExponential(2),
+    basis: "kτ = 5.34 + 4/α² is a fit. A 12×12 mesh was about 5% high and 32×32 was 0.2% the other way. Not tuned to 9.34.",
+    status: shearPct != null && Math.abs(shearPct) <= 1.5 ? "limited" : "fail",
+  })
+
+  const combined = fem({ aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 50, psi: 1, tauMpa: 20, nx: 10, ny: 10 })
+  push({
+    id: "V06",
+    title: "Combined compression + shear FEM",
+    expected: "One positive λ on the combined field. No classical interaction formula.",
+    actual: combined.ok ? `λ = ${num(combined.modes[0]?.lambda, 4)} · σ1,cr = ${num(combined.modes[0]?.sigma1CrMpa, 2)} MPa · τcr = ${num(combined.modes[0]?.tauCrMpa, 2)} MPa` : combined.reason,
+    difference: "—",
+    tolerance: "solves, not a code utilisation",
+    mesh: "10×10",
+    residual: combined.residual.toExponential(2),
+    basis: "λ multiplies the entered σ and τ together. Classical σcr and τcr stay separate. No interaction equation is implemented.",
+    status: combined.ok && (combined.modes[0]?.lambda ?? 0) > 0 ? "limited" : "fail",
+  })
+
+  const bare = fem({ aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 8, ny: 8 })
+  const bareS = bare.modes[0]?.sigma1CrMpa ?? 0
+  const beam = (id: string, axis: "x" | "y", at: number, ei: number, area = 800) => ({
+    id, axis, atMm: at, eiNmm2: ei, gjNmm2: ei / 20, areaMm2: area, rigid: false,
+  })
+  const oneLong = fem({
+    aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 8, ny: 8,
+    stiffeners: [beam("L1", "x", 500, 210000 * 2.05e6)],
+  })
+  const twoLong = fem({
+    aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 8, ny: 8,
+    stiffeners: [beam("L1", "x", 330, 210000 * 1e6), beam("L2", "x", 670, 210000 * 1e6)],
+  })
+  const oneTrans = fem({
+    aMm: 2000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 12, ny: 8,
+    stiffeners: [beam("T1", "y", 500, 210000 * 2.05e6)],
+  })
+  const bareLong = fem({ aMm: 2000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 12, ny: 8 })
+  const twoTrans = fem({
+    aMm: 2000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 12, ny: 8,
+    stiffeners: [beam("T1", "y", 650, 210000 * 1e6), beam("T2", "y", 1350, 210000 * 1e6)],
+  })
+  const grid = fem({
+    aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 8, ny: 8,
+    stiffeners: [beam("L", "x", 500, 210000 * 1e6), beam("T", "y", 500, 210000 * 1e6)],
+  })
+  const stiffRow = (id: string, title: string, result: FemResult, bareValue: number, factor: number, basis: string) => {
+    const got = result.modes[0]?.sigma1CrMpa ?? 0
+    const ok = result.ok && got > bareValue * factor
+    push({
+      id, title,
+      expected: `Above ${factor}× the bare plate on the same mesh (${bareValue.toFixed(1)} MPa)`,
+      actual: result.ok ? `${got.toFixed(1)} MPa` : result.reason,
+      difference: bareValue ? `${pct(got, bareValue).toFixed(1)}% vs bare` : "—",
+      tolerance: `> ${factor}× bare. Not a code stiffener check.`,
+      mesh: `${result.nx}×${result.ny}`,
+      residual: result.residual.toExponential(2),
+      basis,
+      status: ok ? "pass" : "fail",
+    })
+  }
+  push({
+    id: "V07",
+    title: "No stiffener",
+    expected: `${squareRef.toFixed(2)} MPa on this 8×8 mesh, within 2%`,
+    actual: bare.ok ? `${bareS.toFixed(2)} MPa` : bare.reason,
+    difference: `${pct(bareS, squareRef).toFixed(2)}%`,
+    tolerance: "2%",
+    mesh: "8×8",
+    residual: bare.residual.toExponential(2),
+    basis: "Bare-plate reference for the stiffener rows. Same idealisation as V01 on a coarser mesh.",
+    status: Math.abs(pct(bareS, squareRef)) <= 2 ? "pass" : "fail",
+  })
+  stiffRow("V08", "One longitudinal stiffener", oneLong, bareS, 1.5, "A flat-bar EI about the plate mid-surface raises σcr. The bar is not treated as a simple support.")
+  stiffRow("V09", "Two longitudinal stiffeners", twoLong, bareS, 1.3, "Two lines at third-points. Stiffness adds. No subpanel closed form is used.")
+  stiffRow("V10", "One transverse stiffener off the natural node", oneTrans, bareLong.modes[0]?.sigma1CrMpa ?? 0, 1.05, "α = 2 buckles in two half-waves, so the bar is at a/4, not on the node line. A bar on the node would barely move λ1.")
+  stiffRow("V11", "Two transverse stiffeners", twoTrans, bareLong.modes[0]?.sigma1CrMpa ?? 0, 1.1, "Two transverse lines. Compared with the bare α = 2 plate on the same mesh.")
+  stiffRow("V12", "Longitudinal + transverse grid", grid, bareS, 1.3, "The crossing shares plate nodes. EI of both members is assembled. Not a rigid support.")
+
+  const patchCase = (ss: number, at: number, n = 10) => fem({
+    aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 0, psi: 1, tauMpa: 0, nx: n, ny: n,
+    patchLoad: { edge: "y1", atMm: at, lengthMm: ss, forceN: 20000 },
+  })
+  const centre = patchCase(200, 500)
+  const right = patchCase(200, 700)
+  const left = patchCase(200, 300)
+  const centreF = centre.modes[0]?.patchCrN ?? 0
+  const rightF = right.modes[0]?.patchCrN ?? 0
+  const leftF = left.modes[0]?.patchCrN ?? 0
+  const mirrorPct = pct(leftF, rightF)
+  push({
+    id: "V13",
+    title: "Centred patch",
+    expected: "Positive critical force. Nodal resultant equals 20000 N.",
+    actual: centre.ok ? `${centreF.toFixed(0)} N` : centre.reason,
+    difference: "—",
+    tolerance: "equilibrium in the pre-buckling note",
+    mesh: "10×10",
+    residual: centre.residual.toExponential(2),
+    basis: centre.prestressNote || "No prestress note.",
+    status: centre.ok && centreF > 0 && /Difference 0\.0000%/.test(centre.prestressNote) ? "pass" : centre.ok ? "limited" : "fail",
+  })
+  push({
+    id: "V14",
+    title: "Mirrored patch symmetry",
+    expected: "Fcr(at 300) = Fcr(at 700)",
+    actual: `${leftF.toFixed(0)} N and ${rightF.toFixed(0)} N`,
+    difference: `${mirrorPct.toFixed(3)}%`,
+    tolerance: "0.5%",
+    mesh: "10×10",
+    residual: Math.max(left.residual, right.residual).toExponential(2),
+    basis: "Square plate, same ss and force, centres mirrored about mid-width.",
+    status: left.ok && right.ok && Math.abs(mirrorPct) <= 0.5 ? "pass" : "fail",
+  })
+  const short = patchCase(200, 500, 12)
+  const medium = patchCase(500, 500, 12)
+  const longPatch = patchCase(800, 500, 12)
+  const full = patchCase(1000, 500, 12)
+  const series = [short, medium, longPatch, full].map((item) => item.modes[0]?.patchCrN ?? 0)
+  const smooth = series.every((value, index) => index === 0 || value > series[index - 1]! * 0.99)
+  push({
+    id: "V15",
+    title: "Patch-length progression",
+    expected: "Fcr rises as ss goes 200 → 500 → 800 → 1000 at the same force",
+    actual: series.map((value) => `${Math.round(value)} N`).join(" · "),
+    difference: smooth ? "monotonic" : "jump",
+    tolerance: "no decrease",
+    mesh: "12×12",
+    residual: short.residual.toExponential(2),
+    basis: "Same total force. A shorter patch is a more severe local compression. Not a code resistance.",
+    status: smooth && series[0]! > 0 ? "pass" : "fail",
+  })
+  const uniform = fem({ aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 0, sigmaYMpa: 1, psi: 1, tauMpa: 0, nx: 12, ny: 12 })
+  const fullF = full.modes[0]?.patchCrN ?? 0
+  const uniformSigma = uniform.modes[0]?.sigmaYCrMpa ?? 0
+  const fullSigma = fullF / (1000 * 10)
+  const limitPct = uniformSigma ? pct(fullSigma, uniformSigma) : null
+  push({
+    id: "V16",
+    title: "Patch full-edge limit",
+    expected: `Uniform σy,cr = ${num(uniformSigma, 3)} MPa on the same mesh`,
+    actual: `Patch σ = Fcr/(a·t) = ${num(fullSigma, 3)} MPa · Fcr = ${num(fullF, 0)} N`,
+    difference: limitPct == null ? "—" : `${limitPct.toFixed(2)}%`,
+    tolerance: "1%",
+    mesh: "12×12",
+    residual: full.residual.toExponential(2),
+    basis: "ss = a on y = b is uniform compression in y. 20000 N on a 1000×10 mm edge is 2 MPa, so the force multiplier is not compared with the 1 MPa eigenvalue. The membrane stresses are.",
+    status: limitPct != null && Math.abs(limitPct) <= 1 ? "pass" : "fail",
+  })
+
+  const metres = lengthToMm(1, "m")
+  const gpa = stressToMpa(210, "GPa")
+  const kilonewtons = forceToN(10, "kN")
+  const unitPlate = classicalPlate({ aMm: metres, bMm: metres, tMm: lengthToMm(10, "mm"), eMpa: gpa, nu: 0.3, fyMpa: stressToMpa(0.35, "GPa"), fuMpa: 450, sigma1Mpa: 100, psi: 1, tauMpa: 0, edges: SS })
+  const unitOk = metres === 1000 && Math.abs(gpa - 210000) < 1e-6 && kilonewtons === 10000 && unitPlate.sigmaCrMpa != null && Math.abs(unitPlate.sigmaCrMpa - squareRef) / squareRef < 1e-9
+  push({
+    id: "V17",
+    title: "Unit invariance",
+    expected: "1 m = 1000 mm, 210 GPa = 210000 MPa, 10 kN = 10000 N, same σcr",
+    actual: unitOk ? `${unitPlate.sigmaCrMpa?.toFixed(2)} MPa` : `m=${metres}, E=${gpa}, F=${kilonewtons}, σ=${unitPlate.sigmaCrMpa}`,
+    difference: "0 within conversion",
+    tolerance: "exact after conversion to mm, N, MPa",
+    mesh: "analytical",
+    residual: "—",
+    basis: "Shared IQEG unit engine at the boundary. The plate equations are not rewritten in metres.",
+    status: unitOk ? "pass" : "fail",
+  })
+  push({
+    id: "V18",
+    title: "Stale FEM state",
+    expected: "Changing an input clears the live result until FEM is run again",
+    actual: "Sheet rule, not re-clicked inside this solver batch",
+    difference: "—",
+    tolerance: "operator check",
+    mesh: "—",
+    residual: "—",
+    basis: "The sheet compares a key of the canonical inputs with the key stored at the last solve. This batch cannot press the button.",
+    status: "not-verified",
+  })
+  const refused = [
+    fem({ aMm: 1000, bMm: 1000, tMm: 0, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 4, ny: 4 }).ok,
+    fem({ aMm: 1000, bMm: 1000, tMm: 10, nu: 0.6, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 4, ny: 4 }).ok,
+    fem({ aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: -40, psi: 1, tauMpa: 0, nx: 4, ny: 4 }).ok,
+    fem({ aMm: 1000, bMm: 1000, tMm: 10, sigma1Mpa: 0, psi: 1, tauMpa: 0, nx: 4, ny: 4, patchLoad: { edge: "y1", atMm: 50, lengthMm: 200, forceN: 1000 } }).ok,
+  ]
+  push({
+    id: "V19",
+    title: "Invalid input rejection",
+    expected: "t = 0, ν = 0.6, pure tension, and an off-edge patch are refused",
+    actual: refused.some(Boolean) ? "one of them solved" : "all four refused",
+    difference: "—",
+    tolerance: "fail closed",
+    mesh: "—",
+    residual: "—",
+    basis: "No eigenvalue is returned for a non-physical plate or a tensile field with no compression.",
+    status: refused.some(Boolean) ? "fail" : "pass",
+  })
+  push({
+    id: "V20",
+    title: "Eigenpair residual",
+    expected: "Uniform compression residual below 1e-6. Bending residual reported, not hidden.",
+    actual: `V01 ${square.residual.toExponential(2)} · V04 ${bend.residual.toExponential(2)} · target ${square.solverTolerance.toExponential(0)}`,
+    difference: "—",
+    tolerance: "1e-8 where the spectrum is simple",
+    mesh: "see V01 and V04",
+    residual: square.residual.toExponential(2),
+    basis: "Residual is ||Kφ − λ Kg φ|| / ||Kφ||. Both the uniform and the pure-bending eigenpairs are required under 1e-8 before this row passes. A larger bending residual is reported as limited, not hidden.",
+    status: square.residual < 1e-8 && bend.residual < 1e-8 ? "pass" : square.residual < 1e-6 && bend.residual < 1e-4 ? "limited" : "fail",
+  })
+  return rows
+}
+
+
+========================================================================
+FILE src/plate/classical.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { classicalPlate, galerkinSigma, kShear, kShearSeries, kUniform, biaxialUniform, type Edges } from "./classical.ts"
+
+const SS: Edges = { x0: "ss", x1: "ss", y0: "ss", y1: "ss" }
+
+const steel = { eMpa: 210000, nu: 0.3, fyMpa: 350, fuMpa: 450, tauMpa: 0, sigma1Mpa: 100 }
+
+test("A square plate uniform compression k = 4", () => {
+  const exact = kUniform(1)
+  assert.equal(exact.m, 1)
+  assert.ok(Math.abs(exact.k - 4) < 1e-12)
+  const row = classicalPlate({ aMm: 1000, bMm: 1000, tMm: 10, psi: 1, edges: SS, ...steel })
+  assert.equal(row.ok, true)
+  assert.ok(row.kSigma != null && Math.abs(row.kSigma - 4) < 1e-12)
+  assert.equal(row.m, 1)
+  const expect = (4 * Math.PI ** 2 * 210000 * (10 / 1000) ** 2) / (12 * (1 - 0.3 ** 2))
+  assert.ok(row.sigmaCrMpa != null && Math.abs(row.sigmaCrMpa - expect) / expect < 1e-12)
+})
+
+test("Galerkin recovers uniform k = 4", () => {
+  const g = galerkinSigma({ aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, psi: 1 })
+  assert.ok(g)
+  assert.ok(Math.abs(g.k - 4) < 1e-6)
+})
+
+test("B square plate shear fit", () => {
+  assert.ok(Math.abs(kShear(1) - 9.34) < 1e-12)
+  const row = classicalPlate({ aMm: 800, bMm: 800, tMm: 8, psi: 1, edges: SS, ...steel, tauMpa: 40, sigma1Mpa: 0 })
+  assert.ok(row.kTau != null && Math.abs(row.kTau - 9.34) < 1e-12)
+  assert.ok(row.tauCrMpa != null && row.tauCrMpa > 0)
+})
+
+test("C long plate bending gradient approaches 23.9", () => {
+  const g = galerkinSigma({ aMm: 6000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, psi: -1, nMax: 8, mMax: 12 })
+  assert.ok(g)
+  assert.ok(Math.abs(g.k - 23.9) / 23.9 < 0.03, `k=${g.k}`)
+})
+
+test("C pure compression to zero stress edge approaches 7.81", () => {
+  const g = galerkinSigma({ aMm: 5000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, psi: 0, nMax: 8, mMax: 12 })
+  assert.ok(g)
+  assert.ok(Math.abs(g.k - 7.81) / 7.81 < 0.03, `k=${g.k}`)
+})
+
+test("D aspect ratios pick the right half-wave", () => {
+  const cases: [number, number, number][] = [
+    [0.5, 1, 6.25],
+    [1, 1, 4],
+    [2, 2, 4],
+    [4, 4, 4],
+  ]
+  for (const [alpha, m, k] of cases) {
+    const got = kUniform(alpha)
+    assert.equal(got.m, m)
+    assert.ok(Math.abs(got.k - k) < 1e-9)
+    const row = classicalPlate({
+      aMm: alpha * 1000,
+      bMm: 1000,
+      tMm: 10,
+      psi: 1,
+      edges: SS,
+      ...steel,
+    })
+    assert.equal(row.m, m)
+    assert.ok(row.kSigma != null && Math.abs(row.kSigma - k) < 1e-9)
+  }
+})
+
+test("clamped edges do not invent a coefficient", () => {
+  const row = classicalPlate({
+    aMm: 1000,
+    bMm: 1000,
+    tMm: 10,
+    psi: 1,
+    edges: { x0: "fixed", x1: "ss", y0: "ss", y1: "ss" },
+    ...steel,
+  })
+  assert.equal(row.kSigma, null)
+  assert.ok(row.warnings.some((line) => line.includes("unavailable")))
+})
+
+test("bad thickness fails closed", () => {
+  const row = classicalPlate({ aMm: 1000, bMm: 1000, tMm: 0, psi: 1, edges: SS, ...steel })
+  assert.equal(row.ok, false)
+})
+
+test("shear series approaches the fit as more terms are kept", () => {
+  const two = kShearSeries(1, 2)
+  const six = kShearSeries(1, 6)
+  assert.ok(two && six)
+  assert.ok(two.k > six.k)
+  assert.ok(Math.abs(six.k - kShear(1)) / kShear(1) < 0.005, String(six.k))
+})
+
+test("equal biaxial compression of a square plate is k = 2", () => {
+  const row = biaxialUniform({ aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigmaXMpa: 1, sigmaYMpa: 1 })
+  assert.ok(row)
+  const scale = (Math.PI ** 2 * 210000 * (10 / 1000) ** 2) / (12 * (1 - 0.3 * 0.3))
+  assert.ok(Math.abs(row.sigmaXCrMpa / scale - 2) < 1e-9, String(row.sigmaXCrMpa / scale))
+  assert.equal(row.m, 1)
+  assert.equal(row.n, 1)
+})
+
+
+========================================================================
+FILE src/plate/classical.ts
+========================================================================
+
+/** Classical thin-plate buckling. Compression is positive. Lengths mm, stress MPa (N/mm²). */
+
+export type EdgeKind = "ss" | "fixed" | "free" | "elastic"
+
+export type Edges = { x0: EdgeKind; x1: EdgeKind; y0: EdgeKind; y1: EdgeKind }
+
+export type ClassicalInput = {
+  aMm: number
+  bMm: number
+  tMm: number
+  eMpa: number
+  nu: number
+  fyMpa: number
+  fuMpa: number
+  /** Direct stress at y = 0. Compression positive. */
+  sigma1Mpa: number
+  /** σ(y=b) / σ(y=0). */
+  psi: number
+  tauMpa: number
+  edges: Edges
+}
+
+export type TraceStep = {
+  id: string
+  label: string
+  equation: string
+  substitution: string
+  result: string
+}
+
+export type ModeRow = { m: number; n: number; k: number; sigmaMpa: number }
+
+export type ClassicalResult = {
+  ok: boolean
+  reason: string
+  alpha: number | null
+  dNmm: number | null
+  kSigma: number | null
+  kTau: number | null
+  sigmaCrMpa: number | null
+  tauCrMpa: number | null
+  m: number | null
+  n: number | null
+  modes: ModeRow[]
+  method: string
+  warnings: string[]
+  steps: TraceStep[]
+  ratioSigma: number | null
+  ratioTau: number | null
+}
+
+const PI2 = Math.PI * Math.PI
+
+export function flexuralRigidity(eMpa: number, tMm: number, nu: number): number {
+  return (eMpa * tMm ** 3) / (12 * (1 - nu * nu))
+}
+
+/** Simply supported, uniform σx. Exact Navier minimum. */
+export function kUniform(alpha: number, mMax = 24): { k: number; m: number; modes: ModeRow[] } {
+  const modes: ModeRow[] = []
+  let best = Infinity
+  let bestM = 1
+  const limit = Math.max(6, Math.ceil(alpha * 2) + 2, mMax)
+  for (let m = 1; m <= limit; m++) {
+    const k = (m / alpha + alpha / m) ** 2
+    modes.push({ m, n: 1, k, sigmaMpa: 0 })
+    if (k < best) {
+      best = k
+      bestM = m
+    }
+  }
+  return { k: best, m: bestM, modes }
+}
+
+/** Timoshenko closed-form fit. Not an infinite series. */
+export function kShear(alpha: number): number {
+  if (alpha >= 1) return 5.34 + 4 / (alpha * alpha)
+  return 4 + 5.34 / (alpha * alpha)
+}
+
+function shearCouple(m: number, n: number, p: number, q: number): number {
+  if (((m - p) & 1) === 0 || ((n - q) & 1) === 0) return 0
+  return (4 * m * n * p * q) / ((p * p - m * m) * (n * n - q * q))
+}
+
+function jacobiCyclicValues(matrix: number[][]): number[] {
+  const n = matrix.length
+  const a = matrix.map((row) => row.slice())
+  const rotate = (p: number, q: number) => {
+    const app = a[p]![p]!
+    const aqq = a[q]![q]!
+    const apq = a[p]![q]!
+    let t: number
+    if (Math.abs(app - aqq) <= 1e-18 * (Math.abs(app) + Math.abs(aqq) + 1)) t = apq >= 0 ? 1 : -1
+    else {
+      const tau = (aqq - app) / (2 * apq)
+      t = Math.sign(tau) / (Math.abs(tau) + Math.hypot(1, tau))
+    }
+    const c = 1 / Math.hypot(1, t)
+    const s = t * c
+    a[p]![p] = app - t * apq
+    a[q]![q] = aqq + t * apq
+    a[p]![q] = 0
+    a[q]![p] = 0
+    for (let k = 0; k < n; k++) {
+      if (k === p || k === q) continue
+      const aik = a[k]![p]!
+      const akq = a[k]![q]!
+      const nextP = c * aik - s * akq
+      const nextQ = s * aik + c * akq
+      a[k]![p] = nextP
+      a[p]![k] = nextP
+      a[k]![q] = nextQ
+      a[q]![k] = nextQ
+    }
+  }
+  for (let sweep = 0; sweep < 80; sweep++) {
+    let off = 0
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) off += a[i]![j]! * a[i]![j]!
+    if (off <= 1e-28 * Math.max(1, n)) break
+    for (let p = 0; p < n - 1; p++) for (let q = p + 1; q < n; q++) {
+      const scale = Math.abs(a[p]![p]!) + Math.abs(a[q]![q]!) + 1e-30
+      if (Math.abs(a[p]![q]!) > 1e-15 * scale) rotate(p, q)
+    }
+  }
+  return a.map((row, i) => row[i]!)
+}
+
+function largestAlgebraic(matrix: number[][]): number {
+  const n = matrix.length
+  if (n === 0) return 0
+  if (n === 1) return matrix[0]![0]!
+  const dot = (a: Float64Array, b: Float64Array) => {
+    let s = 0
+    for (let i = 0; i < n; i++) s += a[i]! * b[i]!
+    return s
+  }
+  const axpy = (y: Float64Array, x: Float64Array, scale: number) => {
+    for (let i = 0; i < n; i++) y[i]! += scale * x[i]!
+  }
+  const apply = (x: Float64Array) => {
+    const y = new Float64Array(n)
+    for (let i = 0; i < n; i++) {
+      const row = matrix[i]!
+      let s = 0
+      for (let j = 0; j < n; j++) s += row[j]! * x[j]!
+      y[i] = s
+    }
+    return y
+  }
+  let v = new Float64Array(n)
+  let rng = 17
+  for (let i = 0; i < n; i++) {
+    rng = (Math.imul(1664525, rng) + 1013904223) >>> 0
+    v[i] = (rng / 4294967296) - 0.5
+  }
+  let vn = Math.sqrt(dot(v, v))
+  for (let i = 0; i < n; i++) v[i] = v[i]! / vn
+  const steps = Math.min(n - 1, n <= 48 ? n - 1 : 72)
+  const Q: Float64Array[] = []
+  const AQ: Float64Array[] = []
+  let prev: Float64Array | null = null
+  let betaPrev = 0
+  for (let step = 0; step < steps; step++) {
+    const Av = apply(v)
+    AQ.push(Float64Array.from(Av))
+    Q.push(v)
+    if (prev) axpy(Av, prev, -betaPrev)
+    const alpha = dot(v, Av)
+    axpy(Av, v, -alpha)
+    for (let pass = 0; pass < 2; pass++) {
+      for (const q of Q) {
+        const overlap = dot(Av, q)
+        if (overlap !== 0) axpy(Av, q, -overlap)
+      }
+    }
+    const beta = Math.sqrt(Math.max(0, dot(Av, Av)))
+    if (!(beta > 1e-14)) break
+    prev = v
+    betaPrev = beta
+    const next = new Float64Array(n)
+    const inv = 1 / beta
+    for (let i = 0; i < n; i++) next[i] = Av[i]! * inv
+    v = next
+  }
+  const m = Q.length
+  const M = Array.from({ length: m }, () => Array(m).fill(0))
+  for (let a = 0; a < m; a++) {
+    for (let b = a; b < m; b++) {
+      const s = 0.5 * (dot(Q[a]!, AQ[b]!) + dot(Q[b]!, AQ[a]!))
+      M[a]![b] = s
+      M[b]![a] = s
+    }
+  }
+  let best = -Infinity
+  for (const value of jacobiCyclicValues(M)) if (value > best) best = value
+  return Number.isFinite(best) ? best : 0
+}
+
+/**
+ * Navier–Galerkin series for constant shear on four simple supports.
+ * An incomplete sine basis is an upper bound on the Kirchhoff coefficient.
+ * More terms lower that bound. Not a code coefficient and not the Timoshenko fit.
+ */
+export function kShearSeries(alpha: number, terms = 6): { k: number; terms: number } | null {
+  if (!(alpha > 0) || !Number.isFinite(alpha)) return null
+  const nMax = Math.max(2, Math.min(16, Math.floor(terms)))
+  const ids: [number, number][] = []
+  for (let m = 1; m <= nMax; m++) for (let n = 1; n <= nMax; n++) ids.push([m, n])
+  const diag = ids.map(([m, n]) => {
+    const s = (m * m) / (alpha * alpha) + n * n
+    return (Math.PI ** 4) * s * s * (alpha / 4)
+  })
+  const n = ids.length
+  const B = Array.from({ length: n }, () => Array(n).fill(0))
+  for (let i = 0; i < n; i++) for (let j = i; j < n; j++) {
+    const [m, ni] = ids[i]!
+    const [p, q] = ids[j]!
+    const v = (2 * shearCouple(m, ni, p, q)) / Math.sqrt(diag[i]! * diag[j]!)
+    B[i]![j] = v
+    B[j]![i] = v
+  }
+  const mu = largestAlgebraic(B)
+  if (!(mu > 0)) return null
+  return { k: (1 / mu) / (Math.PI * Math.PI), terms: nMax }
+}
+
+/**
+ * Uniform σx and σy, four edges simply supported. Navier modes do not couple.
+ * λ multiplies both stresses. No shear term and no code interaction.
+ */
+export function biaxialUniform(input: {
+  aMm: number
+  bMm: number
+  tMm: number
+  eMpa: number
+  nu: number
+  sigmaXMpa: number
+  sigmaYMpa: number
+}): { lambda: number; sigmaXCrMpa: number; sigmaYCrMpa: number; m: number; n: number } | null {
+  const { aMm, bMm, tMm, eMpa, nu, sigmaXMpa, sigmaYMpa } = input
+  if (!(aMm > 0 && bMm > 0 && tMm > 0 && eMpa > 0) || !(nu > 0 && nu < 0.5)) return null
+  const d = flexuralRigidity(eMpa, tMm, nu)
+  let best = Infinity
+  let bestM = 1
+  let bestN = 1
+  for (let m = 1; m <= 8; m++) for (let n = 1; n <= 8; n++) {
+    const mx = (m * Math.PI) / aMm
+    const my = (n * Math.PI) / bMm
+    const load = sigmaXMpa * mx * mx + sigmaYMpa * my * my
+    if (!(load > 0)) continue
+    const lambda = (d * (mx * mx + my * my) ** 2) / (tMm * load)
+    if (lambda < best) {
+      best = lambda
+      bestM = m
+      bestN = n
+    }
+  }
+  if (!Number.isFinite(best)) return null
+  return {
+    lambda: best,
+    sigmaXCrMpa: best * sigmaXMpa,
+    sigmaYCrMpa: best * sigmaYMpa,
+    m: bestM,
+    n: bestN,
+  }
+}
+
+
+/**
+ * Long outstand: y = b free, other three edges simply supported, uniform compression.
+ * Approximate coefficient used in plate texts, exact only as a/b → ∞ (k → 0.425).
+ */
+export function kOutstand(alpha: number): number {
+  return 0.425 + 1 / (alpha * alpha)
+}
+
+function sameParity(n: number, r: number): boolean {
+  return (n - r) % 2 === 0
+}
+
+/** ∫₀¹ ξ sin(nπξ) sin(rπξ) dξ */
+function xiSinSin(n: number, r: number): number {
+  if (n === r) return 0.25
+  if (sameParity(n, r)) return 0
+  const d = n - r
+  const s = n + r
+  return -(1 / PI2) * (1 / (d * d) - 1 / (s * s))
+}
+
+/** ∫₀^b [1 − (1−ψ) y/b] sin(nπy/b) sin(rπy/b) dy */
+export function stressIntegral(bMm: number, psi: number, n: number, r: number): number {
+  if (n === r) return (bMm * (1 + psi)) / 4
+  return bMm * (1 - psi) * (1 / PI2) * (1 / (n - r) ** 2 - 1 / (n + r) ** 2) * (sameParity(n, r) ? 0 : 1)
+}
+
+function jacobiValues(matrix: number[][]): number[] {
+  const n = matrix.length
+  const a = matrix.map((row) => row.slice())
+  for (let sweep = 0; sweep < 40; sweep++) {
+    let p = 0
+    let q = 1
+    let max = 0
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const v = Math.abs(a[i]![j]!)
+        if (v > max) {
+          max = v
+          p = i
+          q = j
+        }
+      }
+    }
+    if (max < 1e-14) break
+    const app = a[p]![p]!
+    const aqq = a[q]![q]!
+    const apq = a[p]![q]!
+    let t: number
+    if (Math.abs(app - aqq) <= 1e-18 * (Math.abs(app) + Math.abs(aqq) + 1)) {
+      t = apq >= 0 ? 1 : -1
+    } else {
+      const tau = (aqq - app) / (2 * apq)
+      t = Math.sign(tau) / (Math.abs(tau) + Math.hypot(1, tau))
+    }
+    const c = 1 / Math.hypot(1, t)
+    const s = t * c
+    a[p]![p] = app - t * apq
+    a[q]![q] = aqq + t * apq
+    a[p]![q] = 0
+    a[q]![p] = 0
+    for (let k = 0; k < n; k++) {
+      if (k === p || k === q) continue
+      const aik = a[k]![p]!
+      const akq = a[k]![q]!
+      const vip = c * aik - s * akq
+      const viq = s * aik + c * akq
+      a[k]![p] = vip
+      a[p]![k] = vip
+      a[k]![q] = viq
+      a[q]![k] = viq
+    }
+  }
+  return a.map((row, i) => row[i]!)
+}
+
+/**
+ * Rayleigh–Ritz / Navier coupling for simply supported edges and σx(y).
+ * Returns the lowest critical value of σ1, and k based on b.
+ */
+export function galerkinSigma(input: {
+  aMm: number
+  bMm: number
+  tMm: number
+  eMpa: number
+  nu: number
+  psi: number
+  nMax?: number
+  mMax?: number
+}): { sigma: number; k: number; m: number; n: number; modes: ModeRow[] } | null {
+  const { aMm, bMm, tMm, eMpa, nu, psi } = input
+  const nMax = input.nMax ?? 6
+  const d = flexuralRigidity(eMpa, tMm, nu)
+  const alpha = aMm / bMm
+  const mMax = input.mMax ?? Math.max(8, Math.ceil(alpha * 2) + 3)
+  const modes: ModeRow[] = []
+  let best = Infinity
+  let bestM = 1
+  let bestN = 1
+  for (let m = 1; m <= mMax; m++) {
+    const mx = (m * Math.PI) / aMm
+    const kgScale = tMm * mx * mx * (aMm / 2)
+    const kBend: number[] = []
+    const g: number[][] = []
+    for (let n = 1; n <= nMax; n++) {
+      const ky = (n * Math.PI) / bMm
+      const kappa = mx * mx + ky * ky
+      kBend.push(d * kappa * kappa * ((aMm * bMm) / 4))
+      const row: number[] = []
+      for (let r = 1; r <= nMax; r++) row.push(kgScale * stressIntegral(bMm, psi, n, r))
+      g.push(row)
+    }
+    const bHat = kBend.map((kii, i) => g[i]!.map((gij, j) => gij / Math.sqrt(kii * kBend[j]!)))
+    const mus = jacobiValues(bHat)
+    let local = Infinity
+    let localN = 1
+    mus.forEach((mu, index) => {
+      if (mu > 1e-10) {
+        const sigma = 1 / mu
+        if (sigma < local) {
+          local = sigma
+          localN = index + 1
+        }
+      }
+    })
+    if (Number.isFinite(local)) {
+      const k = (local * tMm * bMm * bMm) / (PI2 * d)
+      modes.push({ m, n: localN, k, sigmaMpa: local })
+      if (local < best) {
+        best = local
+        bestM = m
+        bestN = localN
+      }
+    }
+  }
+  if (!Number.isFinite(best)) return null
+  const k = (best * tMm * bMm * bMm) / (PI2 * d)
+  return { sigma: best, k, m: bestM, n: bestN, modes }
+}
+
+function allSimply(edges: Edges): boolean {
+  return edges.x0 === "ss" && edges.x1 === "ss" && edges.y0 === "ss" && edges.y1 === "ss"
+}
+
+function outstandCase(edges: Edges, psi: number): boolean {
+  return edges.y1 === "free" && edges.y0 === "ss" && edges.x0 === "ss" && edges.x1 === "ss" && Math.abs(psi - 1) < 1e-9
+}
+
+function sigmaFromK(k: number, eMpa: number, nu: number, tMm: number, bMm: number): number {
+  return (k * PI2 * eMpa * (tMm / bMm) ** 2) / (12 * (1 - nu * nu))
+}
+
+export function classicalPlate(input: ClassicalInput): ClassicalResult {
+  const warnings: string[] = []
+  const fail = (reason: string): ClassicalResult => ({
+    ok: false,
+    reason,
+    alpha: null,
+    dNmm: null,
+    kSigma: null,
+    kTau: null,
+    sigmaCrMpa: null,
+    tauCrMpa: null,
+    m: null,
+    n: null,
+    modes: [],
+    method: "—",
+    warnings,
+    steps: [],
+    ratioSigma: null,
+    ratioTau: null,
+  })
+
+  const { aMm, bMm, tMm, eMpa, nu, fyMpa, fuMpa, psi, tauMpa, sigma1Mpa, edges } = input
+  if (![aMm, bMm, tMm, eMpa, fyMpa, fuMpa].every((n) => Number.isFinite(n) && n > 0)) {
+    return fail("Length, thickness, E, fy and fu must be positive numbers.")
+  }
+  if (!(nu > 0 && nu < 0.5)) return fail("Poisson's ratio must be between 0 and 0.5.")
+  if (!Number.isFinite(psi) || !Number.isFinite(tauMpa) || !Number.isFinite(sigma1Mpa)) {
+    return fail("Stress values must be numbers. Compression is positive.")
+  }
+  if (fuMpa + 1e-9 < fyMpa) warnings.push("fu is below fy. Check the material entry.")
+  if (tMm > bMm / 10 || tMm > aMm / 10) {
+    warnings.push("Thickness is large for thin-plate theory. The critical stress is still the Kirchhoff value.")
+  }
+
+  const alpha = aMm / bMm
+  const d = flexuralRigidity(eMpa, tMm, nu)
+  const steps: TraceStep[] = [
+    {
+      id: "alpha",
+      label: "Aspect ratio",
+      equation: "α = a / b",
+      substitution: `a = ${aMm} mm, b = ${bMm} mm`,
+      result: `${alpha} —`,
+    },
+    {
+      id: "D",
+      label: "Flexural rigidity",
+      equation: "D = E t³ / [12 (1 − ν²)]",
+      substitution: `E = ${eMpa} MPa, t = ${tMm} mm, ν = ${nu}`,
+      result: `${d} N·mm`,
+    },
+  ]
+
+  let kSigma: number | null = null
+  let sigmaCr: number | null = null
+  let m: number | null = null
+  let n: number | null = null
+  let modes: ModeRow[] = []
+  let method = ""
+
+  const directWanted = Math.abs(sigma1Mpa) > 0 || Math.abs(psi - 1) > 1e-12
+  if (allSimply(edges)) {
+    if (Math.abs(psi - 1) < 1e-9) {
+      const exact = kUniform(alpha)
+      kSigma = exact.k
+      m = exact.m
+      n = 1
+      sigmaCr = sigmaFromK(exact.k, eMpa, nu, tMm, bMm)
+      modes = exact.modes.map((row) => ({ ...row, sigmaMpa: sigmaFromK(row.k, eMpa, nu, tMm, bMm) }))
+      method = "Navier, four edges simply supported, uniform σx"
+    } else {
+      const energy = galerkinSigma({ aMm, bMm, tMm, eMpa, nu, psi })
+      if (!energy) return fail("No compressive buckling eigenvalue for this stress shape.")
+      kSigma = energy.k
+      sigmaCr = energy.sigma
+      m = energy.m
+      n = energy.n
+      modes = energy.modes
+      method = "Navier–Galerkin, four edges simply supported, linear σx"
+    }
+    steps.push({
+      id: "k",
+      label: "Buckling coefficient kσ",
+      equation: Math.abs(psi - 1) < 1e-9 ? "kσ(m) = (m/α + α/m)², minimum over m" : "kσ from the lowest eigenvalue of the Navier coupling in n",
+      substitution: `α = ${alpha}, ψ = ${psi}, m = ${m}, n = ${n}. Candidates: ${modes.slice(0, 8).map((row) => `m=${row.m} k=${row.k.toFixed(3)}`).join("; ")}`,
+      result: `${kSigma}`,
+    })
+    steps.push({
+      id: "scr",
+      label: "Elastic critical direct stress",
+      equation: "σcr = kσ π² E / [12 (1 − ν²)] (t/b)²",
+      substitution: `kσ = ${kSigma}, E = ${eMpa} MPa, ν = ${nu}, t = ${tMm} mm, b = ${bMm} mm`,
+      result: `${sigmaCr} MPa`,
+    })
+  } else if (outstandCase(edges, psi)) {
+    kSigma = kOutstand(alpha)
+    m = 1
+    n = 1
+    sigmaCr = sigmaFromK(kSigma, eMpa, nu, tMm, bMm)
+    modes = [{ m: 1, n: 1, k: kSigma, sigmaMpa: sigmaCr }]
+    method = "Approximate outstand, three edges simply supported, y = b free"
+    warnings.push("The outstand coefficient 0.425 + (b/a)² is the usual approximation, not a full series solution.")
+    steps.push({
+      id: "k",
+      label: "Buckling coefficient kσ",
+      equation: "kσ ≈ 0.425 + (b/a)²",
+      substitution: `a = ${aMm} mm, b = ${bMm} mm`,
+      result: `${kSigma}`,
+    })
+    steps.push({
+      id: "scr",
+      label: "Elastic critical direct stress",
+      equation: "σcr = kσ π² E / [12 (1 − ν²)] (t/b)²",
+      substitution: `kσ = ${kSigma}, b = outstand width`,
+      result: `${sigmaCr} MPa`,
+    })
+  } else if (directWanted) {
+    warnings.push("Analytical solution unavailable for this boundary-condition combination.")
+    method = "No closed form for these edges"
+  } else {
+    method = "Direct-stress solution not requested"
+  }
+
+  let kTau: number | null = null
+  let tauCr: number | null = null
+  if (Math.abs(tauMpa) > 0 || true) {
+    if (allSimply(edges)) {
+      kTau = kShear(alpha)
+      tauCr = sigmaFromK(kTau, eMpa, nu, tMm, bMm)
+      steps.push({
+        id: "kt",
+        label: "Shear coefficient kτ",
+        equation: alpha >= 1 ? "kτ = 5.34 + 4/α²" : "kτ = 4 + 5.34/α²",
+        substitution: `α = ${alpha}. Timoshenko fit, not an exact series.`,
+        result: `${kTau}`,
+      })
+      const series = kShearSeries(alpha, 12)
+      if (series) {
+        steps.push({
+          id: "kts",
+          label: "Shear coefficient from a Navier series",
+          equation: "Stationary Navier–Galerkin energy for constant τ. Sine terms 1…12 in each direction.",
+          substitution: `α = ${alpha}, terms ${series.terms}×${series.terms}. Energy upper bound. Orders 12 and 16 differ by less than 0.02% on α = 0.5, 1, 2 and 4. The Timoshenko fit is not this series.`,
+          result: `${series.k}`,
+        })
+      }
+      steps.push({
+        id: "tcr",
+        label: "Elastic critical shear stress",
+        equation: "τcr = kτ π² E / [12 (1 − ν²)] (t/b)²",
+        substitution: `kτ = ${kTau}, t = ${tMm} mm, b = ${bMm} mm`,
+        result: `${tauCr} MPa`,
+      })
+    } else if (Math.abs(tauMpa) > 0) {
+      warnings.push("Analytical shear solution unavailable unless all four edges are simply supported.")
+    }
+  }
+
+  if (Math.abs(sigma1Mpa) > 0 && Math.abs(tauMpa) > 0) {
+    warnings.push("Direct stress and shear are both non-zero. Each critical stress is separate. No interaction equation is applied.")
+  }
+  if (sigmaCr != null && sigmaCr > fyMpa) {
+    warnings.push("Elastic critical stress is above fy. Yielding is expected before this elastic buckle. Not a code resistance.")
+  }
+  if (sigma1Mpa < 0) warnings.push("Compression is positive. A negative σ1 is tension at y = 0.")
+
+  const ratioSigma = sigmaCr != null && sigmaCr > 0 && sigma1Mpa > 0 ? sigma1Mpa / sigmaCr : null
+  const ratioTau = tauCr != null && tauCr > 0 && Math.abs(tauMpa) > 0 ? Math.abs(tauMpa) / tauCr : null
+
+  return {
+    ok: true,
+    reason: "",
+    alpha,
+    dNmm: d,
+    kSigma,
+    kTau,
+    sigmaCrMpa: sigmaCr,
+    tauCrMpa: tauCr,
+    m,
+    n,
+    modes: modes.sort((p, q) => p.sigmaMpa - q.sigmaMpa || p.k - q.k).slice(0, 8),
+    method: method || "—",
+    warnings,
+    steps,
+    ratioSigma,
+    ratioTau,
+  }
+}
+
+
+========================================================================
+FILE src/plate/codes/adapter.ts
+========================================================================
+
+/** Design-check statuses. A missing table is data-required, not a number. */
+
+export type CheckStatus =
+  | "available"
+  | "data-required"
+  | "not-applicable"
+  | "out-of-scope"
+  | "source-required"
+  | "pass"
+  | "fail"
+  | "not-checked"
+  | "invalid"
+
+export type CodeRow = {
+  id: string
+  group: string
+  title: string
+  standard: string
+  edition: string
+  clause: string
+  dataset: string
+  status: CheckStatus
+  equation: string
+  substitution: string
+  result: string
+  note: string
+}
+
+/** Verified AS 4100 numbers only. An absent key is not zero and is not a resistance. */
+export const AS4100_DATA: Record<string, number> = {}
+
+export function readNumber(table: Record<string, number>, key: string): number | null {
+  const value = table[key]
+  return typeof value === "number" && Number.isFinite(value) ? value : null
+}
+
+export function elasticFence(standard: string): CodeRow {
+  return {
+    id: "elastic-fence",
+    group: "LAYERS",
+    title: "Elastic critical stress is not a design resistance",
+    standard,
+    edition: "—",
+    clause: "—",
+    dataset: "none",
+    status: "not-applicable",
+    equation: "σcr, τcr and λFEM stay in the elastic layer",
+    substitution: "No design factor is applied to the eigenvalue.",
+    result: "NOT A DESIGN CAPACITY",
+    note: "Layer 3 does not read FEM λ as Rd. A missing code row does not invent one.",
+  }
+}
+
+
+========================================================================
+FILE src/plate/codes/as4100.ts
+========================================================================
+
+import { elasticFence, type CheckStatus, type CodeRow } from "./adapter.ts"
+import { evaluateAs4100, type Report } from "../standards/as4100/evaluate.ts"
+import { AS4100_META, type DesignInput } from "../standards/as4100/shared.ts"
+
+export type As4100Input = {
+  aMm: number
+  bMm: number
+  tMm: number
+  fyMpa: number
+  edgesSimplySupported: boolean
+  stiffenerCount: number
+  /** Explicit code input. Panel a and b are not read as clear width. */
+  design?: Partial<DesignInput>
+}
+
+const EDITION = "2020 incorporating Amendment No. 1"
+
+function summaryStatus(report: Report): CheckStatus {
+  if (report.overall === "pass") return "pass"
+  if (report.checks.some((row) => row.normative && row.status === "fail")) return "fail"
+  if (report.checks.some((row) => row.normative && row.status === "invalid")) return "invalid"
+  return "not-checked"
+}
+
+/** AS 4100:2020 plate and web checks. Elastic panel sizes stay out of the equations. */
+export function as4100PlateChecks(input: As4100Input): CodeRow[] {
+  const report = evaluateAs4100(input.design ?? {})
+  const rows: CodeRow[] = [
+    elasticFence("AS 4100:2020"),
+    {
+      id: "dimension-fence",
+      group: "LAYERS",
+      title: "Panel dimensions are not code dimensions",
+      standard: "AS 4100:2020",
+      edition: EDITION,
+      clause: "5.2.2",
+      dataset: AS4100_META.dataset,
+      status: "not-applicable",
+      equation: "b is the clear width defined by the clause, not the FEM panel side",
+      substitution: `Elastic panel a = ${input.aMm} mm, b = ${input.bMm} mm, t = ${input.tMm} mm, fy = ${input.fyMpa} MPa, stiffeners drawn = ${input.stiffenerCount}. None of these is copied into b, dp, tw or s.`,
+      result: "NOT USED",
+      note: "Assign a dimension on the design input before a clause will use it.",
+    },
+    {
+      id: "summary",
+      group: "SUMMARY",
+      title: "Governing design summary",
+      standard: "AS 4100:2020",
+      edition: EDITION,
+      clause: "Table 3.4",
+      dataset: AS4100_META.dataset,
+      status: summaryStatus(report),
+      equation: "Utilisation = design action / design capacity for the clause that defines the check",
+      substitution: `Governing: ${report.governing}. Utilisation: ${report.governingUtil == null ? "—" : report.governingUtil.toFixed(3)}.`,
+      result: report.headline,
+      note: "A pass covers only the checks that ran. It is not a certified design. φ and γM are not mixed.",
+    },
+  ]
+  for (const check of report.checks) {
+    rows.push({
+      id: check.id,
+      group: check.group,
+      title: check.title,
+      standard: "AS 4100:2020",
+      edition: EDITION,
+      clause: check.clause,
+      dataset: AS4100_META.dataset,
+      status: check.status,
+      equation: check.equation,
+      substitution: check.steps.length ? check.steps.join(" ") : check.note,
+      result: check.result,
+      note: [
+        check.note,
+        check.nominal != null ? `Nominal = ${check.nominal} ${check.nominalUnit}.` : "",
+        check.phi != null ? `φ = ${check.phi}. ${check.phiSource}` : "",
+        check.designCapacity != null ? `Design capacity = ${check.designCapacity} N.` : "",
+        check.action != null ? `Action = ${check.action} N.` : "",
+        check.utilisation != null && Number.isFinite(check.utilisation) ? `Utilisation = ${check.utilisation.toFixed(4)}.` : "",
+        check.normative ? "" : "Not included in the governing utilisation.",
+      ].filter(Boolean).join(" "),
+    })
+  }
+  return rows
+}
+
+
+========================================================================
+FILE src/plate/codes/as5224.ts
+========================================================================
+
+import type { CodeRow } from "./adapter.ts"
+import { elasticFence } from "./adapter.ts"
+
+/** AS 5224 / ISO 20332 adapter. The workbench stays a general panel. No crane resistance is stored. */
+export function as5224PlateChecks(): CodeRow[] {
+  const row = (id: string, title: string, clause: string): CodeRow => ({
+    id,
+    group: "CRANE PLATED CHECKS",
+    title,
+    standard: "AS 5224 / ISO 20332",
+    edition: "AS 5224 / ISO 20332",
+    clause,
+    dataset: "none — no resistance table",
+    status: "data-required",
+    equation: "Standard expression not transcribed",
+    substitution: "No verified AS 5224 or ISO 20332 number is in the adapter.",
+    result: "VERIFIED STANDARD DATA REQUIRED",
+    note: "This does not turn the panel model into a crane girder. A girder preset is not connected.",
+  })
+  return [
+    elasticFence("AS 5224 / ISO 20332"),
+    row("plate", "Plated element local buckling", "ISO 20332 plated members"),
+    row("web", "Web panel", "ISO 20332 web"),
+    row("stiffener", "Stiffener on a plated member", "ISO 20332 stiffener"),
+    row("patch", "Local load introduction", "ISO 20332 local load"),
+  ]
+}
+
+
+========================================================================
+FILE src/plate/codes/dispatch.ts
+========================================================================
+
+import { as4100PlateChecks, type As4100Input } from "./as4100.ts"
+import { as5224PlateChecks } from "./as5224.ts"
+import { elasticFence, type CodeRow } from "./adapter.ts"
+import { en1993PlateChecks } from "./en1993.ts"
+
+export type DesignMethod = "none" | "as4100" | "en1993" | "as5224"
+
+export const DESIGN_METHODS: { id: DesignMethod; label: string }[] = [
+  { id: "none", label: "NONE — ELASTIC ANALYSIS ONLY" },
+  { id: "as4100", label: "AS 4100" },
+  { id: "en1993", label: "EN 1993-1-5" },
+  { id: "as5224", label: "AS 5224 / ISO 20332" },
+]
+
+export function designChecks(method: DesignMethod, input: As4100Input & { hasPatch: boolean }): CodeRow[] {
+  if (method === "as4100") return as4100PlateChecks(input)
+  if (method === "en1993") return en1993PlateChecks({ stiffenerCount: input.stiffenerCount, hasPatch: input.hasPatch })
+  if (method === "as5224") return as5224PlateChecks()
+  return [elasticFence("NONE")]
+}
+
+
+========================================================================
+FILE src/plate/codes/en1993.ts
+========================================================================
+
+import type { CodeRow } from "./adapter.ts"
+import { elasticFence } from "./adapter.ts"
+
+export type En1993Input = {
+  stiffenerCount: number
+  hasPatch: boolean
+}
+
+/** EN 1993-1-5 slots. No reduction factor, no table and no National Annex value is stored. */
+export function en1993PlateChecks(input: En1993Input): CodeRow[] {
+  const row = (
+    id: string,
+    group: string,
+    title: string,
+    clause: string,
+    status: CodeRow["status"],
+    equation: string,
+    note: string,
+  ): CodeRow => ({
+    id,
+    group,
+    title,
+    standard: "EN 1993-1-5",
+    edition: "EN 1993-1-5",
+    clause,
+    dataset: "none — no National Annex and no reduction table",
+    status,
+    equation,
+    substitution: "No verified EN 1993-1-5 number is in the adapter.",
+    result: status === "not-applicable" ? "NOT APPLICABLE" : "VERIFIED STANDARD DATA REQUIRED",
+    note,
+  })
+  return [
+    elasticFence("EN 1993-1-5"),
+    row("plate-buckling", "PLATE BUCKLING", "Internal compression element", "4.4 / 4.5", "data-required", "ρ from the plate slenderness curve", "Not transcribed. AS 4100 factors are not used here."),
+    row("effective-width", "EFFECTIVE WIDTH", "Effective area of a Class 4 plate", "4.4", "data-required", "beff = ρ b", "Not transcribed."),
+    row("shear", "SHEAR BUCKLING", "Shear resistance", "5", "data-required", "η and χw", "Not transcribed. Elastic τcr is not this resistance."),
+    row("longitudinal", "LONGITUDINALLY STIFFENED PANEL", "Reduced stress or effective section", "4.5", input.stiffenerCount > 0 ? "data-required" : "not-applicable", "Column-like and plate-like behaviour", input.stiffenerCount > 0 ? "Stiffeners exist in the model. The clause is not transcribed." : "No longitudinal stiffener in the model."),
+    row("transverse", "TRANSVERSE STIFFENER", "Stiffness and strength", "9", input.stiffenerCount > 0 ? "data-required" : "not-applicable", "Minimum second moment and force resistance", "Not transcribed."),
+    row("patch", "PATCH LOADING", "Local transverse force", "6", input.hasPatch ? "data-required" : "not-applicable", "χF Fcr", input.hasPatch ? "The drawn patch is an elastic load, not this check." : "No patch load in the model."),
+    row("interaction", "INTERACTION", "Combined direct, shear and transverse force", "7", "data-required", "Interaction expressions of Section 7", "Not transcribed. No AS 4100 interaction is substituted."),
+  ]
+}
+
+
+========================================================================
+FILE src/plate/deep.ts
+========================================================================
+
+/** Heavier elastic checks. Not a design-code verification. */
+import { biaxialUniform, classicalPlate, galerkinSigma, kShear, kShearSeries, kUniform, type Edges } from "./classical.ts"
+import { countHalfWaves, solvePlateFem, type FemInput, type FemResult } from "./fem.ts"
+import type { VerifyRow, VerifyStatus } from "./benchmarks.ts"
+
+const SS: Edges = { x0: "ss", x1: "ss", y0: "ss", y1: "ss" }
+const FIXED: Edges = { x0: "fixed", x1: "fixed", y0: "fixed", y1: "fixed" }
+const OUT: Edges = { x0: "ss", x1: "ss", y0: "ss", y1: "free" }
+
+function fem(input: Partial<FemInput>): FemResult {
+  return solvePlateFem(Object.assign({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3,
+    sigma1Mpa: 0, psi: 1, tauMpa: 0, nx: 8, ny: 8,
+    edges: SS, krNPerRadPerMm: 0, shapes: false, modes: 2,
+  }, input))
+}
+
+function pct(got: number, ref: number): number {
+  return (100 * (got - ref)) / Math.abs(ref)
+}
+
+function stressFromK(k: number, t = 10, b = 1000): number {
+  return (k * Math.PI ** 2 * 210000 * (t / b) ** 2) / (12 * (1 - 0.3 * 0.3))
+}
+
+function row(partial: VerifyRow): VerifyRow {
+  return partial
+}
+
+export function runDeepVerification(): VerifyRow[] {
+  const rows: VerifyRow[] = []
+
+  const aspects = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 10]
+  const aspectBits: string[] = []
+  let aspectWorst = 0
+  let aspectFail = false
+  for (const alpha of aspects) {
+    const theory = kUniform(alpha)
+    const ny = alpha < 1 ? 16 : 12
+    const nx = Math.min(60, Math.max(8, Math.round(ny * alpha)))
+    const solved = fem({ aMm: alpha * 1000, bMm: 1000, tMm: 10, sigma1Mpa: 1, psi: 1, nx, ny, shapes: true, modes: 1 })
+    const got = solved.modes[0]?.sigma1CrMpa
+    const ref = stressFromK(theory.k)
+    const err = got == null ? Infinity : pct(got, ref)
+    const waves = solved.ok ? countHalfWaves(solved.modes[0]?.w ?? [], solved.xs, solved.ys, "x") : 0
+    if (!solved.ok || Math.abs(err) > 3 || solved.residual > 1e-6) aspectFail = true
+    aspectWorst = Math.max(aspectWorst, Math.abs(err))
+    aspectBits.push(`α=${alpha} m=${theory.m}/${waves} ${err.toFixed(2)}% r=${solved.residual.toExponential(1)} ${nx}×${ny}`)
+  }
+  rows.push(row({
+    id: "D01",
+    title: "Compression aspect sweep",
+    expected: "FEM within 3% of k(m)=(m/α+α/m)² and the governing half-wave",
+    actual: aspectBits.join(" · "),
+    difference: `${aspectWorst.toFixed(2)}% worst`,
+    tolerance: "3% and residual < 1e-6",
+    mesh: "ny=16 if α<1 else 12, nx from 8 to 60",
+    residual: "see actual",
+    basis: "EXACT ANALYTICAL BENCHMARK. Navier kσ. Mindlin is not forced onto Kirchhoff.",
+    status: aspectFail ? "fail" : "pass",
+  }))
+
+  const psis = [1, 0.75, 0.5, 0.25, 0, -0.25, -0.5, -0.75, -1]
+  const psiBits: string[] = []
+  let psiWorst = 0
+  let psiResidual = 0
+  for (const psi of psis) {
+    const energy = galerkinSigma({ aMm: 5000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, psi, nMax: 8, mMax: 10 })
+    const solved = fem({ aMm: 5000, bMm: 1000, tMm: 10, sigma1Mpa: 100, psi, nx: 30, ny: 11, modes: 1 })
+    const got = solved.modes[0]?.sigma1CrMpa
+    const ref = energy?.sigma ?? NaN
+    const err = got == null || !Number.isFinite(ref) ? Infinity : pct(got, ref)
+    psiWorst = Math.max(psiWorst, Math.abs(err))
+    psiResidual = Math.max(psiResidual, solved.residual)
+    psiBits.push(`ψ=${psi} k=${energy ? energy.k.toFixed(2) : "—"} ${got == null ? "—" : got.toFixed(1)}/${ref.toFixed(1)} ${err.toFixed(2)}% r=${solved.residual.toExponential(1)}`)
+  }
+  const psiStatus: VerifyStatus = psiResidual > 1e-6 ? "fail" : psiWorst <= 2 ? "pass" : "limited"
+  rows.push(row({
+    id: "D02",
+    title: "Stress-gradient sweep",
+    expected: "Each ψ against its own Navier–Galerkin σcr. Residual under 1e-6.",
+    actual: psiBits.join(" · "),
+    difference: `${psiWorst.toFixed(2)}% worst`,
+    tolerance: "2% pass. Above 2% is the 30×11 mesh, not a failed eigenpair, if the residual is small.",
+    mesh: "30×11 on 5000×1000",
+    residual: psiResidual.toExponential(2),
+    basis: "APPROXIMATE ANALYTICAL BENCHMARK. Galerkin in n, minimised over m. Coarse mesh error is left visible.",
+    status: psiStatus,
+  }))
+
+  const shearAspects = [0.5, 1, 2, 3, 4]
+  const shearBits: string[] = []
+  let shearWorstSeries = 0
+  let shearFail = false
+  for (const alpha of shearAspects) {
+    const fit = kShear(alpha)
+    const series = kShearSeries(alpha, 6)
+    const ny = alpha <= 1 ? 20 : 14
+    const nx = Math.min(40, Math.max(12, Math.round(ny * alpha)))
+    const solved = fem({ aMm: alpha * 800, bMm: 800, tMm: 8, sigma1Mpa: 0, tauMpa: 1, nx, ny, modes: 1 })
+    const got = solved.modes[0]?.tauCrMpa
+    const unit = stressFromK(1, 8, 800)
+    const kFem = got == null ? NaN : got / unit
+    const vsSeries = series && Number.isFinite(kFem) ? pct(kFem, series.k) : Infinity
+    const vsFit = Number.isFinite(kFem) ? pct(kFem, fit) : Infinity
+    if (!solved.ok || solved.residual > 1e-6 || Math.abs(vsSeries) > 4) shearFail = true
+    shearWorstSeries = Math.max(shearWorstSeries, Math.abs(vsSeries))
+    shearBits.push(`α=${alpha} series ${series ? series.k.toFixed(3) : "—"} fit ${fit.toFixed(3)} FEM ${Number.isFinite(kFem) ? kFem.toFixed(3) : "—"} (${vsSeries.toFixed(2)}% series, ${vsFit.toFixed(2)}% fit) r=${solved.residual.toExponential(1)}`)
+  }
+  rows.push(row({
+    id: "D03",
+    title: "Shear aspect sweep",
+    expected: "FEM kτ within 4% of the Navier–Galerkin series. The fit is shown beside it.",
+    actual: shearBits.join(" · "),
+    difference: `${shearWorstSeries.toFixed(2)}% vs series`,
+    tolerance: "4% of the series, residual < 1e-6",
+    mesh: "ny=20 if α≤1 else 14, nx at least 12",
+    residual: "see actual",
+    basis: "APPROXIMATE ANALYTICAL BENCHMARK for the series (energy upper bound, 6×6 sines). The Timoshenko expression remains a FIT. On a square plate the 6×6 series and the fit agree to about 0.2%.",
+    status: shearFail ? "fail" : "pass",
+  }))
+
+  const bi = biaxialUniform({ aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigmaXMpa: 1, sigmaYMpa: 1 })
+  const biFem = fem({ sigma1Mpa: 1, sigmaYMpa: 1, psi: 1, nx: 12, ny: 12, modes: 1 })
+  const biGot = biFem.modes[0]?.sigma1CrMpa
+  const biErr = bi && biGot != null ? pct(biGot, bi.sigmaXCrMpa) : Infinity
+  const swapA = fem({ aMm: 1500, bMm: 1000, sigma1Mpa: 1, sigmaYMpa: 0, nx: 15, ny: 10, modes: 1 })
+  const swapB = fem({ aMm: 1000, bMm: 1500, sigma1Mpa: 0, sigmaYMpa: 1, nx: 10, ny: 15, modes: 1 })
+  const swapLeft = swapA.modes[0]?.sigma1CrMpa
+  const swapRight = swapB.modes[0]?.sigmaYCrMpa
+  const swapErr = swapLeft != null && swapRight != null ? Math.abs(pct(swapLeft, swapRight)) : Infinity
+  rows.push(row({
+    id: "D04",
+    title: "Biaxial symmetry",
+    expected: "Square σx=σy matches the Navier k=2 stress. Swapping σx↔σy with a↔b matches.",
+    actual: `equal ${biGot == null ? "—" : biGot.toFixed(2)} vs ${bi ? bi.sigmaXCrMpa.toFixed(2) : "—"} MPa (${Number.isFinite(biErr) ? biErr.toFixed(2) : "—"}%). Swap ${swapLeft?.toFixed(2)} vs ${swapRight?.toFixed(2)} (${swapErr.toFixed(3)}%).`,
+    difference: `${Math.max(Math.abs(biErr), swapErr).toFixed(2)}%`,
+    tolerance: "2% of the closed form, 0.5% on the swap",
+    mesh: "12×12 and 15×10",
+    residual: Math.max(biFem.residual, swapA.residual, swapB.residual).toExponential(2),
+    basis: "EXACT ANALYTICAL BENCHMARK for uniform σx, σy on four simple supports. SYMMETRY VERIFICATION for the swap. No interaction equation.",
+    status: Math.abs(biErr) <= 2 && swapErr <= 0.5 && biFem.residual < 1e-6 ? "pass" : "fail",
+  }))
+
+  const ratios = [0, 0.25, 0.5, 0.75, 1]
+  const combo: number[] = []
+  let comboOk = true
+  for (const ratio of ratios) {
+    const solved = fem({ sigma1Mpa: 1, tauMpa: ratio, nx: 10, ny: 10, modes: 1 })
+    const lambda = solved.modes[0]?.lambda
+    if (!solved.ok || lambda == null || solved.residual > 1e-6) comboOk = false
+    combo.push(lambda ?? NaN)
+  }
+  const plus = fem({ sigma1Mpa: 0, tauMpa: 1, nx: 10, ny: 10, modes: 1 })
+  const minus = fem({ sigma1Mpa: 0, tauMpa: -1, nx: 10, ny: 10, modes: 1 })
+  const plusL = plus.modes[0]?.lambda
+  const minusL = minus.modes[0]?.lambda
+  const signErr = plusL != null && minusL != null ? Math.abs(pct(Math.abs(minusL), Math.abs(plusL))) : Infinity
+  const decreasing = combo.every((value, index) => index === 0 || value < combo[index - 1]! * 1.001)
+  rows.push(row({
+    id: "D05",
+    title: "Combined compression and shear",
+    expected: "λ falls as τ/σ rises. +τ and −τ give the same |λ| on a square SS plate.",
+    actual: `λ(τ/σ)=${combo.map((value) => value.toFixed(2)).join(", ")}. +τ ${plusL?.toFixed(3)} −τ ${minusL?.toFixed(3)} (${signErr.toFixed(4)}%).`,
+    difference: `${signErr.toFixed(4)}% sign`,
+    tolerance: "monotonic λ, sign difference under 0.1%. No interaction formula.",
+    mesh: "10×10",
+    residual: Math.max(plus.residual, minus.residual).toExponential(2),
+    basis: "SYMMETRY VERIFICATION. Classical σcr and τcr stay separate. FEM multiplies the whole field by one λ.",
+    status: comboOk && decreasing && signErr <= 0.1 ? "pass" : "fail",
+  }))
+
+  const bare = fem({ sigma1Mpa: 1, nx: 8, ny: 8, modes: 1 })
+  const tiny = fem({
+    sigma1Mpa: 1, nx: 8, ny: 8, modes: 1,
+    stiffeners: [{ id: "Z", axis: "x", atMm: 500, eiNmm2: 1, gjNmm2: 0, areaMm2: 0, rigid: false }],
+  })
+  const bareS = bare.modes[0]?.sigma1CrMpa ?? NaN
+  const tinyS = tiny.modes[0]?.sigma1CrMpa ?? NaN
+  const zeroErr = pct(tinyS, bareS)
+  rows.push(row({
+    id: "D06",
+    title: "Near-zero stiffener",
+    expected: "EI = 1 N·mm², GJ = 0, A = 0 stays within 0.5% of the bare plate",
+    actual: `bare ${bareS.toFixed(3)} · tiny ${tinyS.toFixed(3)} MPa`,
+    difference: `${zeroErr.toFixed(4)}%`,
+    tolerance: "0.5%",
+    mesh: "8×8",
+    residual: Math.max(bare.residual, tiny.residual).toExponential(2),
+    basis: "LIMITING-CASE VERIFICATION. EI = 0 is omitted on purpose and is not used as the proof.",
+    status: Math.abs(zeroErr) <= 0.5 && tiny.ok ? "pass" : "fail",
+  }))
+
+  const eiLevels = [1e4, 1e6, 1e8, 1e10, 1e12, 1e14]
+  const eiValues = eiLevels.map((ei) => fem({
+    sigma1Mpa: 1, nx: 12, ny: 12, modes: 1,
+    stiffeners: [{ id: "L", axis: "x", atMm: 500, eiNmm2: ei, gjNmm2: 0, areaMm2: 0, rigid: false }],
+  }).modes[0]?.sigma1CrMpa ?? NaN)
+  const sub = stressFromK(4, 10, 500)
+  const high = eiValues[eiValues.length - 1] ?? NaN
+  const highErr = pct(high, sub)
+  const mono = eiValues.every((value, index) => index === 0 || value >= eiValues[index - 1]! * 0.98)
+  rows.push(row({
+    id: "D07",
+    title: "Rigid longitudinal stiffener",
+    expected: `EI→∞ with GJ=0 approaches the SS half-panel σcr ${sub.toFixed(1)} MPa (b/2, k=4). Not assumed equal at a finite EI.`,
+    actual: eiLevels.map((ei, index) => `${ei.toExponential(0)}→${eiValues[index]!.toFixed(1)}`).join(" · "),
+    difference: `${highErr.toFixed(2)}% at EI=1e14`,
+    tolerance: "monotonic rise, then a plateau. Within 8% of the half-panel Kirchhoff stress is a pass. A larger gap stays limited: one shared rotation is not two independent knife edges, and the mesh is finite.",
+    mesh: "12×12, stiffener at y=b/2, A=0 so N=σA is absent",
+    residual: "—",
+    basis: "LIMITING-CASE VERIFICATION. Half panel α=2, kσ=4, width b/2. GJ is zero. Equivalence to a knife edge is not assumed.",
+    status: mono && high > bareS * 2 ? (Math.abs(highErr) <= 8 ? "pass" : "limited") : "fail",
+  }))
+
+  const place = (at: number, axis: "x" | "y") => fem({
+    aMm: axis === "y" ? 2000 : 1000,
+    bMm: 1000,
+    sigma1Mpa: 1,
+    nx: axis === "y" ? 12 : 10,
+    ny: 10,
+    modes: 1,
+    stiffeners: [{ id: "S", axis, atMm: at, eiNmm2: 1e11, gjNmm2: 0, areaMm2: 0, rigid: false }],
+  }).modes[0]?.sigma1CrMpa ?? NaN
+  const yPos = [0.1, 0.2, 0.3, 0.4, 0.5].map((f) => ({ f, lo: place(f * 1000, "x"), hi: place((1 - f) * 1000, "x") }))
+  const yErr = Math.max(...yPos.map((item) => Math.abs(pct(item.lo, item.hi))))
+  const xPos = [0.25, 0.5].map((f) => ({ f, lo: place(f * 2000, "y"), hi: place((1 - f) * 2000, "y") }))
+  const xErr = Math.max(...xPos.map((item) => Math.abs(pct(item.lo, item.hi))))
+  rows.push(row({
+    id: "D08",
+    title: "Longitudinal stiffener position symmetry",
+    expected: "y/b and 1−y/b agree",
+    actual: yPos.map((item) => `${item.f.toFixed(1)} ${item.lo.toFixed(1)}/${item.hi.toFixed(1)}`).join(" · "),
+    difference: `${yErr.toFixed(4)}%`,
+    tolerance: "0.5%",
+    mesh: "10×10",
+    residual: "—",
+    basis: "SYMMETRY VERIFICATION. Same EI, GJ=0, A=0.",
+    status: yErr <= 0.5 ? "pass" : "fail",
+  }))
+  rows.push(row({
+    id: "D09",
+    title: "Transverse stiffener position symmetry",
+    expected: "x/a = 0.25 matches 0.75 on an α=2 plate",
+    actual: xPos.map((item) => `${item.f.toFixed(2)} ${item.lo.toFixed(1)}/${item.hi.toFixed(1)}`).join(" · "),
+    difference: `${xErr.toFixed(4)}%`,
+    tolerance: "1%",
+    mesh: "12×10 on 2000×1000",
+    residual: "—",
+    basis: "SYMMETRY VERIFICATION.",
+    status: xErr <= 1 ? "pass" : "fail",
+  }))
+
+  const cross = fem({
+    sigma1Mpa: 1, nx: 8, ny: 8, modes: 1,
+    stiffeners: [
+      { id: "L", axis: "x", atMm: 500, eiNmm2: 1e7, gjNmm2: 0, areaMm2: 0, rigid: false },
+      { id: "T", axis: "y", atMm: 500, eiNmm2: 1e7, gjNmm2: 0, areaMm2: 0, rigid: false },
+    ],
+  })
+  const joined = cross.stiffenerNotes.join(" ")
+  const connected = /SHOW CONNECTION NODES/.test(joined) && /share plate node/.test(joined)
+  rows.push(row({
+    id: "D10",
+    title: "Stiffener intersection",
+    expected: "One shared plate node, w common, bending and twist DOFs named",
+    actual: connected ? joined.slice(joined.indexOf("SHOW CONNECTION NODES"), joined.indexOf("SHOW CONNECTION NODES") + 220) : joined.slice(0, 180),
+    difference: connected ? "connected" : "missing",
+    tolerance: "the note names the node",
+    mesh: "8×8, crossing at mid-panel",
+    residual: cross.residual.toExponential(2),
+    basis: "NUMERICAL SANITY CHECK of connectivity. Not a proof of stiffener design strength.",
+    status: cross.ok && connected ? "pass" : "fail",
+  }))
+
+  const lengths = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
+  const forces: number[] = []
+  let lengthOk = true
+  for (const fraction of lengths) {
+    const solved = fem({
+      sigma1Mpa: 0, nx: 12, ny: 8, modes: 1,
+      patchLoad: { edge: "y1", atMm: 500, lengthMm: fraction * 1000, forceN: 10000 },
+    })
+    const force = solved.modes[0]?.patchCrN
+    if (!solved.ok || force == null || solved.residual > 1e-5) lengthOk = false
+    forces.push(force ?? NaN)
+  }
+  const smooth = forces.every((value, index) => index === 0 || !(value < forces[index - 1]! * 0.98))
+  rows.push(row({
+    id: "D11",
+    title: "Patch length sweep",
+    expected: "Fcr rises smoothly as ss/a goes from 0.05 to 1 at constant force magnitude",
+    actual: lengths.map((fraction, index) => `${fraction.toFixed(2)}→${forces[index]!.toFixed(0)}`).join(" · "),
+    difference: smooth ? "monotonic" : "dip",
+    tolerance: "each step at least 98% of the previous Fcr",
+    mesh: "12×8, patch on y=b, 10000 N",
+    residual: "—",
+    basis: "LIMITING-CASE VERIFICATION of the load length. Not a code patch resistance.",
+    status: lengthOk && smooth ? "pass" : "fail",
+  }))
+
+  const centres = [0.25, 0.35, 0.5]
+  const posErrs: number[] = []
+  const posBits: string[] = []
+  for (const fraction of centres) {
+    const left = fem({
+      sigma1Mpa: 0, nx: 12, ny: 8, modes: 1,
+      patchLoad: { edge: "y1", atMm: fraction * 1000, lengthMm: 200, forceN: 10000 },
+    })
+    const right = fem({
+      sigma1Mpa: 0, nx: 12, ny: 8, modes: 1,
+      patchLoad: { edge: "y1", atMm: (1 - fraction) * 1000, lengthMm: 200, forceN: 10000 },
+    })
+    const a = left.modes[0]?.patchCrN
+    const b = right.modes[0]?.patchCrN
+    const err = a != null && b != null ? Math.abs(pct(a, b)) : Infinity
+    posErrs.push(err)
+    posBits.push(`${fraction.toFixed(2)} ${a?.toFixed(0)}/${b?.toFixed(0)}`)
+  }
+  const posWorst = Math.max(...posErrs)
+  rows.push(row({
+    id: "D12",
+    title: "Patch position symmetry",
+    expected: "xp/a and 1−xp/a agree for a 200 mm patch",
+    actual: posBits.join(" · "),
+    difference: `${posWorst.toFixed(4)}%`,
+    tolerance: "1%",
+    mesh: "12×8",
+    residual: "—",
+    basis: "SYMMETRY VERIFICATION.",
+    status: posWorst <= 1 ? "pass" : "fail",
+  }))
+
+  const equilibrated = fem({
+    sigma1Mpa: 0, nx: 10, ny: 8, modes: 1,
+    patchLoad: { edge: "y1", atMm: 400, lengthMm: 300, forceN: 8000 },
+  })
+  const eq = equilibrated.prestressNote
+  const eqOk = /Force imbalance 0\.0000%/.test(eq) || /Force imbalance 0\.00/.test(eq)
+  const imbalanceMatch = eq.match(/Force imbalance ([0-9.]+)%/)
+  const imbalance = imbalanceMatch ? Number(imbalanceMatch[1]) : Infinity
+  rows.push(row({
+    id: "D13",
+    title: "Patch force equilibrium",
+    expected: "Applied Fx, Fy and Reaction Fx, Fy balance. Moment about the centre is reported.",
+    actual: eq.includes("Applied Fx") ? eq.slice(eq.indexOf("Applied Fx")) : equilibrated.reason,
+    difference: `${Number.isFinite(imbalance) ? imbalance.toFixed(4) : "—"}%`,
+    tolerance: "force imbalance under 0.05%",
+    mesh: "10×8",
+    residual: equilibrated.residual.toExponential(2),
+    basis: "EQUILIBRIUM VERIFICATION. Reactions come from ∫ Bᵀσ on the restrained DOFs, not from reversing the applied force by hand.",
+    status: equilibrated.ok && imbalance < 0.05 ? "pass" : "fail",
+  }))
+
+  const sym = fem({ sigma1Mpa: 1, psi: -1, nx: 12, ny: 8, modes: 1 })
+  const rel = sym.symmetryNote.match(/relative ([0-9]+(?:\.[0-9]+)?(?:e[+-]?\d+)?)/i)
+  const relN = rel ? Number(rel[1]) : Infinity
+  rows.push(row({
+    id: "D14",
+    title: "K and Kg symmetry",
+    expected: "Element off-diagonal mismatch far below 1e-8 relative",
+    actual: sym.symmetryNote,
+    difference: Number.isFinite(relN) ? relN.toExponential(2) : "—",
+    tolerance: "relative mismatch < 1e-8",
+    mesh: "12×8 pure bending",
+    residual: sym.residual.toExponential(2),
+    basis: "NUMERICAL SANITY CHECK. Band storage keeps the lower triangle, so the solve uses a symmetric operator.",
+    status: sym.ok && relN < 1e-8 && sym.residual < 1e-6 ? "pass" : "fail",
+  }))
+
+  const fixed = fem({ sigma1Mpa: 1, edges: FIXED, nx: 8, ny: 8, modes: 1 })
+  const outstand = fem({ aMm: 2000, bMm: 400, sigma1Mpa: 1, edges: OUT, nx: 12, ny: 8, modes: 1 })
+  const outTheory = classicalPlate({
+    aMm: 2000, bMm: 400, tMm: 10, eMpa: 210000, nu: 0.3, fyMpa: 350, fuMpa: 450,
+    sigma1Mpa: 1, psi: 1, tauMpa: 0, edges: OUT,
+  })
+  const outGot = outstand.modes[0]?.sigma1CrMpa
+  const outErr = outGot != null && outTheory.sigmaCrMpa != null ? pct(outGot, outTheory.sigmaCrMpa) : Infinity
+  const fixedS = fixed.modes[0]?.sigma1CrMpa ?? 0
+  rows.push(row({
+    id: "D15",
+    title: "Boundary-condition spot check",
+    expected: "Fixed edges above SS. Outstand FEM within 15% of the approximate k=0.425+(b/a)² formula.",
+    actual: `SS ${bareS.toFixed(1)} · fixed ${fixedS.toFixed(1)} · outstand ${outGot == null ? "—" : outGot.toFixed(1)} vs approx ${outTheory.sigmaCrMpa?.toFixed(1)} (${Number.isFinite(outErr) ? outErr.toFixed(1) : "—"}%)`,
+    difference: `${Number.isFinite(outErr) ? outErr.toFixed(1) : "—"}% vs the outstand approximation`,
+    tolerance: "fixed > SS. Outstand within 15% of an approximation.",
+    mesh: "8×8 and 12×8",
+    residual: Math.max(fixed.residual, outstand.residual).toExponential(2),
+    basis: "LIMITING-CASE VERIFICATION. The outstand coefficient is approximate. Clamped-edge k is not invented.",
+    status: fixed.ok && fixedS > bareS * 1.3 && Math.abs(outErr) <= 15 ? "limited" : "fail",
+  }))
+
+  const freePlate = fem({ sigma1Mpa: 1, edges: { x0: "free", x1: "free", y0: "free", y1: "free" }, nx: 4, ny: 4, modes: 1 })
+  rows.push(row({
+    id: "D16",
+    title: "Rigid-body restraint",
+    expected: "A plate with every edge free does not return a buckling eigenvalue",
+    actual: freePlate.ok ? "solved" : freePlate.reason,
+    difference: "—",
+    tolerance: "singular K is refused",
+    mesh: "4×4",
+    residual: "—",
+    basis: "NUMERICAL SANITY CHECK. No rigid-body mode is reported as a buckle.",
+    status: freePlate.ok ? "fail" : "pass",
+  }))
+
+  const beside = (atMm: number) => fem({
+    sigma1Mpa: 0, nx: 12, ny: 8, modes: 1,
+    patchLoad: { edge: "y1", atMm, lengthMm: 200, forceN: 10000 },
+    stiffeners: [{ id: "T", axis: "y", atMm: 500, eiNmm2: 1e11, gjNmm2: 0, areaMm2: 0, rigid: false }],
+  })
+  const before = beside(200)
+  const aligned = beside(500)
+  const after = beside(800)
+  const fOf = (solved: FemResult) => solved.modes[0]?.patchCrN
+  const patchStiffOk = before.ok && aligned.ok && after.ok
+    && before.residual < 1e-6 && aligned.residual < 1e-6 && after.residual < 1e-6
+  const mirror = fOf(before) != null && fOf(after) != null ? Math.abs(pct(fOf(before)!, fOf(after)!)) : Infinity
+  rows.push(row({
+    id: "D17",
+    title: "Patch beside a transverse stiffener",
+    expected: "Three elastic solves. A patch mirrored about the stiffener matches. No code resistance.",
+    actual: `x=200 ${fOf(before)?.toFixed(0) ?? "—"} N · on stiffener x=500 ${fOf(aligned)?.toFixed(0) ?? "—"} N · x=800 ${fOf(after)?.toFixed(0) ?? "—"} N`,
+    difference: `${Number.isFinite(mirror) ? mirror.toFixed(3) : "—"}% mirror`,
+    tolerance: "mirror under 1%, all three residual < 1e-6",
+    mesh: "12×8, EI=1e11 transverse stiffener at mid-length",
+    residual: Math.max(before.residual, aligned.residual, after.residual).toExponential(2),
+    basis: "SYMMETRY VERIFICATION plus a limiting-case observation. There is no analytical patch-plus-stiffener target. Not a code patch resistance.",
+    status: patchStiffOk && mirror <= 1 ? "limited" : "fail",
+  }))
+
+  return rows
+}
+
+
+========================================================================
+FILE src/plate/eigen.ts
+========================================================================
+
+/** Symmetric Lanczos on A = L⁻¹ Kg L⁻ᵀ, with full reorthogonalisation.
+ * K = L Lᵀ stays factored by banded Cholesky. K − σ Kg is not factored:
+ * that pencil is indefinite once Kg changes sign, which pure bending does.
+ * Seeking the largest |μ| = 1/|λ| puts the ±λ cluster at the two ends of A,
+ * where a Krylov basis can separate neighbours that unshifted iteration cannot.
+ */
+
+import { bandedBack, bandedForward, bandedMatvec, bandedSolve } from "./banded.ts"
+
+export type BucklingEigen = {
+  ok: boolean
+  reason: string
+  /** Up to eight eigenvalues, smallest |λ| first. */
+  lambdas: number[]
+  /** Matching eigenvectors in the free DOF basis. */
+  columns: Float64Array[]
+  iterations: number
+}
+
+function jacobiCyclic(matrix: number[][]): { values: number[]; vectors: number[][] } {
+  const n = matrix.length
+  const A = matrix.map((row) => row.slice())
+  const V = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0) as number))
+  const rotate = (p: number, q: number) => {
+    const app = A[p]![p]!
+    const aqq = A[q]![q]!
+    const apq = A[p]![q]!
+    let t: number
+    if (Math.abs(app - aqq) <= 1e-18 * (Math.abs(app) + Math.abs(aqq) + 1)) t = apq >= 0 ? 1 : -1
+    else {
+      const tau = (aqq - app) / (2 * apq)
+      t = Math.sign(tau) / (Math.abs(tau) + Math.hypot(1, tau))
+    }
+    const c = 1 / Math.hypot(1, t)
+    const s = t * c
+    A[p]![p] = app - t * apq
+    A[q]![q] = aqq + t * apq
+    A[p]![q] = 0
+    A[q]![p] = 0
+    for (let k = 0; k < n; k++) {
+      const vip = V[k]![p]!
+      const viq = V[k]![q]!
+      V[k]![p] = c * vip - s * viq
+      V[k]![q] = s * vip + c * viq
+      if (k === p || k === q) continue
+      const aik = A[k]![p]!
+      const akq = A[k]![q]!
+      const nextP = c * aik - s * akq
+      const nextQ = s * aik + c * akq
+      A[k]![p] = nextP
+      A[p]![k] = nextP
+      A[k]![q] = nextQ
+      A[q]![k] = nextQ
+    }
+  }
+  for (let sweep = 0; sweep < 60; sweep++) {
+    let off = 0
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) off += A[i]![j]! * A[i]![j]!
+    if (off <= 1e-28 * Math.max(1, n)) break
+    for (let p = 0; p < n - 1; p++) for (let q = p + 1; q < n; q++) {
+      const scale = Math.abs(A[p]![p]!) + Math.abs(A[q]![q]!) + 1e-30
+      if (Math.abs(A[p]![q]!) > 1e-15 * scale) rotate(p, q)
+    }
+  }
+  const values = A.map((row, i) => row[i]!)
+  const vectors = values.map((_, col) => V.map((row) => row[col]!))
+  return { values, vectors }
+}
+
+export function bucklingModes(input: {
+  K: Float64Array
+  Kg: Float64Array
+  factor: Float64Array
+  n: number
+  bw: number
+  keep: number[]
+  nodesX: number
+  xs: number[]
+  ys: number[]
+  aMm: number
+  bMm: number
+  /** Krylov length. The iteration stops early once the lowest positive residual is under 1e-9. */
+  maxSteps: number
+}): BucklingEigen {
+  const { K, Kg, factor, n, bw, keep, nodesX, xs, ys } = input
+  const fail = (reason: string): BucklingEigen => ({ ok: false, reason, lambdas: [], columns: [], iterations: 0 })
+  if (n < 1) return fail("There are no free degrees of freedom.")
+  const maxSteps = Math.max(1, Math.min(n - 1, input.maxSteps))
+  const gvec = new Float64Array(n)
+  const rhs = new Float64Array(n)
+  const dot = (a: Float64Array, b: Float64Array) => {
+    let s = 0
+    for (let i = 0; i < n; i++) s += a[i]! * b[i]!
+    return s
+  }
+  const axpy = (y: Float64Array, x: Float64Array, scale: number) => {
+    for (let i = 0; i < n; i++) y[i]! += scale * x[i]!
+  }
+  const applyA = (y: Float64Array) => {
+    const u = bandedBack(factor, n, bw, y)
+    bandedMatvec(Kg, n, bw, u, gvec)
+    return bandedForward(factor, n, bw, gvec)
+  }
+  const rayleigh = (phi: Float64Array) => {
+    bandedMatvec(K, n, bw, phi, rhs)
+    bandedMatvec(Kg, n, bw, phi, gvec)
+    let sk = 0
+    let sg = 0
+    for (let i = 0; i < n; i++) {
+      sk += phi[i]! * rhs[i]!
+      sg += phi[i]! * gvec[i]!
+    }
+    return sg !== 0 ? sk / sg : Number.POSITIVE_INFINITY
+  }
+  const residualOf = (phi: Float64Array, lambda: number) => {
+    bandedMatvec(K, n, bw, phi, rhs)
+    bandedMatvec(Kg, n, bw, phi, gvec)
+    let num = 0
+    let k2 = 0
+    for (let i = 0; i < n; i++) {
+      const r = rhs[i]! - lambda * gvec[i]!
+      num += r * r
+      k2 += rhs[i]! * rhs[i]!
+    }
+    const kn = Math.sqrt(k2)
+    return kn > 0 ? Math.sqrt(num) / kn : 0
+  }
+  const waves: [number, number][] = [[1, 1], [2, 1], [3, 1], [1, 3], [4, 1], [2, 2], [1, 5], [5, 1], [3, 2], [1, 2]]
+  const seed = new Float64Array(n)
+  let rng = 123456789
+  for (let i = 0; i < n; i++) {
+    const g = keep[i]!
+    const node = Math.floor(g / 3)
+    const ix = node % nodesX
+    const iy = Math.floor(node / nodesX)
+    let value = 0
+    if (g % 3 === 0) {
+      for (const wave of waves) {
+        value += Math.sin((wave[0] * Math.PI * xs[ix]!) / input.aMm) * Math.sin((wave[1] * Math.PI * ys[iy]!) / input.bMm)
+      }
+    } else value = 0.02 * Math.sin((ix + 1) * 0.7) * Math.cos((iy + 1) * 0.4)
+    rng = (Math.imul(1664525, rng) + 1013904223) >>> 0
+    seed[i] = value + (rng / 4294967296 - 0.5) * 1e-4
+  }
+  let seedNorm = Math.sqrt(dot(seed, seed))
+  if (!(seedNorm > 0)) {
+    for (let i = 0; i < n; i++) seed[i] = 1
+    seedNorm = Math.sqrt(n)
+  }
+  for (let i = 0; i < n; i++) seed[i] = seed[i]! / seedNorm
+  const Q: Float64Array[] = []
+  const AQ: Float64Array[] = []
+  let v = seed
+  let prev: Float64Array | null = null
+  let betaPrev = 0
+  let eigen: { values: number[]; vectors: number[][] } | null = null
+  const project = (): { values: number[]; vectors: number[][] } => {
+    const m = Q.length
+    const M = Array.from({ length: m }, () => Array(m).fill(0))
+    for (let a = 0; a < m; a++) {
+      for (let b = a; b < m; b++) {
+        const s = 0.5 * (dot(Q[a]!, AQ[b]!) + dot(Q[b]!, AQ[a]!))
+        M[a]![b] = s
+        M[b]![a] = s
+      }
+    }
+    eigen = jacobiCyclic(M)
+    return eigen
+  }
+  const phiFrom = (coeffs: number[]) => {
+    const y = new Float64Array(n)
+    for (let k = 0; k < Q.length; k++) axpy(y, Q[k]!, coeffs[k] ?? 0)
+    const yn = Math.sqrt(dot(y, y))
+    if (yn > 0) for (let i = 0; i < n; i++) y[i] = y[i]! / yn
+    return bandedBack(factor, n, bw, y)
+  }
+  const lowestPositive = () => {
+    if (!eigen) return null
+    let best = -1
+    let bestMu = 0
+    for (let i = 0; i < eigen.values.length; i++) {
+      const mu = eigen.values[i]!
+      if (mu > bestMu) {
+        bestMu = mu
+        best = i
+      }
+    }
+    if (best < 0 || !(bestMu > 1e-18)) return null
+    const coeffs = eigen.vectors[best]
+    if (!coeffs) return null
+    const phi = phiFrom(coeffs)
+    const lambda = rayleigh(phi)
+    if (!(lambda > 0) || !Number.isFinite(lambda)) return null
+    return residualOf(phi, lambda)
+  }
+  for (let step = 0; step < maxSteps; step++) {
+    const Av = applyA(v)
+    AQ.push(Float64Array.from(Av))
+    Q.push(v)
+    if (prev) axpy(Av, prev, -betaPrev)
+    const alpha = dot(v, Av)
+    axpy(Av, v, -alpha)
+    for (let pass = 0; pass < 2; pass++) {
+      for (const q of Q) {
+        const overlap = dot(Av, q)
+        if (overlap !== 0) axpy(Av, q, -overlap)
+      }
+    }
+    const beta = Math.sqrt(Math.max(0, dot(Av, Av)))
+    const scale = Math.abs(alpha) + betaPrev + beta
+    const dependent = !(beta > Math.max(1e-14, 1e-12 * Math.max(1, scale)))
+    const checkpoint = dependent || Q.length === maxSteps || (Q.length >= 12 && Q.length % 12 === 0)
+    if (checkpoint) {
+      eigen = project()
+      const lead = lowestPositive()
+      if (dependent || (lead != null && lead < 1e-9)) break
+    }
+    if (dependent) break
+    prev = v
+    betaPrev = beta
+    const next = new Float64Array(n)
+    const invBeta = 1 / beta
+    for (let i = 0; i < n; i++) next[i] = Av[i]! * invBeta
+    v = next
+  }
+  if (!eigen) eigen = project()
+  if (Q.length < 1) return fail("The eigenvalue iteration did not produce a basis.")
+  const order = eigen.values
+    .map((mu, index) => ({ mu, index, lambda: Math.abs(mu) > 1e-18 ? 1 / mu : Number.POSITIVE_INFINITY }))
+    .filter((row) => Number.isFinite(row.lambda) && Math.abs(row.lambda) < 1e12)
+    .sort((p, q) => Math.abs(p.lambda) - Math.abs(q.lambda))
+  const keepCount = Math.min(8, order.length)
+  const columns: Float64Array[] = []
+  const lambdas: number[] = []
+  for (let c = 0; c < keepCount; c++) {
+    const coeffs = eigen.vectors[order[c]!.index]
+    if (!coeffs) continue
+    const phi = phiFrom(coeffs)
+    const lambda = rayleigh(phi)
+    columns.push(phi)
+    lambdas.push(Number.isFinite(lambda) ? lambda : order[c]!.lambda)
+  }
+  let lead = -1
+  let leadLambda = Infinity
+  for (let c = 0; c < lambdas.length; c++) {
+    const lambda = lambdas[c]!
+    if (lambda > 1e-8 && lambda < leadLambda) {
+      leadLambda = lambda
+      lead = c
+    }
+  }
+  if (lead >= 0 && residualOf(columns[lead]!, leadLambda) > 1e-9) {
+    const cluster: Float64Array[] = []
+    for (let c = 0; c < lambdas.length; c++) {
+      if (c === lead) continue
+      const lambda = lambdas[c]!
+      if (Number.isFinite(lambda) && Math.abs(Math.abs(lambda) - leadLambda) / leadLambda < 0.25) cluster.push(columns[c]!)
+    }
+    let vec = Float64Array.from(columns[lead]!)
+    let bestVec = Float64Array.from(vec)
+    let bestLambda = leadLambda
+    let bestResidual = residualOf(vec, leadLambda)
+    const tmp = new Float64Array(n)
+    for (let polish = 0; polish < 6 && bestResidual > 1e-9; polish++) {
+      bandedMatvec(Kg, n, bw, vec, gvec)
+      const y = bandedSolve(factor, n, bw, gvec)
+      for (const other of cluster) {
+        bandedMatvec(Kg, n, bw, other, tmp)
+        let gg = 0
+        let pg = 0
+        for (let i = 0; i < n; i++) {
+          gg += other[i]! * tmp[i]!
+          pg += y[i]! * tmp[i]!
+        }
+        if (Math.abs(gg) > 0) {
+          const alpha = pg / gg
+          for (let i = 0; i < n; i++) y[i]! -= alpha * other[i]!
+        }
+      }
+      const lambda = rayleigh(y)
+      if (!Number.isFinite(lambda) || !(lambda > 0)) break
+      if (Math.abs(lambda - leadLambda) / leadLambda > 0.05) break
+      const scaleN = Math.sqrt(dot(y, y))
+      if (!(scaleN > 0)) break
+      for (let i = 0; i < n; i++) vec[i] = y[i]! / scaleN
+      const got = residualOf(vec, lambda)
+      if (got < bestResidual) {
+        bestResidual = got
+        bestLambda = lambda
+        bestVec = Float64Array.from(vec)
+      } else break
+    }
+    columns[lead] = bestVec
+    lambdas[lead] = bestLambda
+  }
+  return { ok: true, reason: "", lambdas, columns, iterations: Q.length }
+}
+
+
+========================================================================
+FILE src/plate/fem.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { solvePlateFem } from "./fem.ts"
+
+const SS = { x0: "ss", x1: "ss", y0: "ss", y1: "ss" } as const
+
+test("A FEM square plate approaches k = 4", () => {
+  const exact = (4 * Math.PI ** 2 * 210000 * (10 / 1000) ** 2) / (12 * (1 - 0.3 ** 2))
+  const fem = solvePlateFem({
+    aMm: 1000,
+    bMm: 1000,
+    tMm: 10,
+    eMpa: 210000,
+    nu: 0.3,
+    sigma1Mpa: 1,
+    psi: 1,
+    tauMpa: 0,
+    nx: 12,
+    ny: 12,
+    edges: SS,
+    krNPerRadPerMm: 0,
+    modes: 4,
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  const got = fem.modes[0]?.sigma1CrMpa
+  assert.ok(got != null)
+  const err = Math.abs(got - exact) / exact
+  assert.ok(err < 0.01, `FEM ${got} exact ${exact} err ${err}`)
+})
+
+test("long plate uniform compression stays near k = 4", () => {
+  const exact = (4 * Math.PI ** 2 * 210000 * (10 / 1000) ** 2) / (12 * (1 - 0.3 ** 2))
+  const fem = solvePlateFem({
+    aMm: 2000,
+    bMm: 1000,
+    tMm: 10,
+    eMpa: 210000,
+    nu: 0.3,
+    sigma1Mpa: 1,
+    psi: 1,
+    tauMpa: 0,
+    nx: 16,
+    ny: 8,
+    edges: SS,
+    krNPerRadPerMm: 0,
+    modes: 4,
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  const got = fem.modes[0]?.sigma1CrMpa
+  assert.ok(got != null)
+  const err = Math.abs(got - exact) / exact
+  assert.ok(err < 0.03, `FEM ${got} exact ${exact} err ${err}`)
+})
+
+test("square shear approaches the Timoshenko fit", () => {
+  const kTau = 9.34
+  const exact = (kTau * Math.PI ** 2 * 210000 * (8 / 800) ** 2) / (12 * (1 - 0.3 ** 2))
+  const fem = solvePlateFem({
+    aMm: 800,
+    bMm: 800,
+    tMm: 8,
+    eMpa: 210000,
+    nu: 0.3,
+    sigma1Mpa: 0,
+    psi: 1,
+    tauMpa: 1,
+    nx: 16,
+    ny: 16,
+    edges: SS,
+    krNPerRadPerMm: 0,
+    modes: 4,
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  const got = fem.modes[0]?.tauCrMpa
+  assert.ok(got != null)
+  const err = Math.abs(got - exact) / exact
+  assert.ok(err < 0.03, `FEM ${got} fit ${exact} err ${err}`)
+})
+
+
+========================================================================
+FILE src/plate/fem.ts
+========================================================================
+
+/**
+ * Rectangular Mindlin plate, bilinear quad, reduced shear integration.
+ * Banded K and Kg. K φ = λ Kg φ. Eigenvectors feed the mode viewer.
+ * Not a copy of the Navier coefficient.
+ */
+
+import { bandAdd, bandedCholesky, bandedMatvec } from "./banded.ts"
+import type { EdgeKind, Edges } from "./classical.ts"
+import { bucklingModes } from "./eigen.ts"
+import { modeMac } from "./mac.ts"
+import { patchInterval, solvePatchPrestress, type PatchLoad, type Prestress } from "./prestress.ts"
+import { engineLine } from "./version.ts"
+
+export type { PatchLoad } from "./prestress.ts"
+
+export type FemStiffener = {
+  id: string
+  axis: "x" | "y"
+  atMm: number
+  eiNmm2: number
+  gjNmm2: number
+  areaMm2: number
+  rigid: boolean
+}
+
+export type FemPatch = { x0: number; x1: number; y0: number; y1: number; sigmaYMpa: number }
+export type TauSample = { yMm: number; tauMpa: number }
+
+export type FemInput = {
+  aMm: number
+  bMm: number
+  tMm: number
+  eMpa: number
+  nu: number
+  sigma1Mpa: number
+  psi: number
+  tauMpa: number
+  tauSamples?: TauSample[]
+  sigmaYMpa?: number
+  patches?: FemPatch[]
+  /** Edge traction used in the plane-stress pre-buckling solve. Not a code resistance. */
+  patchLoad?: PatchLoad
+  nx: number
+  ny: number
+  edges: Edges
+  krNPerRadPerMm: number
+  stiffeners?: FemStiffener[]
+  modes?: number
+  shapes?: boolean
+}
+
+export type FemMode = {
+  lambda: number
+  sigma1CrMpa: number | null
+  /** Uniform σy at the critical multiplier. Not a patch force. */
+  sigmaYCrMpa: number | null
+  tauCrMpa: number | null
+  patchCrN: number | null
+  w: number[]
+}
+
+export type FemMeshLine = { x1: number; y1: number; x2: number; y2: number }
+
+export type FemResult = {
+  ok: boolean
+  reason: string
+  elements: number
+  nodes: number
+  dof: number
+  freeDof: number
+  nx: number
+  ny: number
+  xs: number[]
+  ys: number[]
+  elementAspect: number
+  aspectWarning: string
+  modes: FemMode[]
+  iterations: number
+  residual: number
+  /** ||Kφ − λ Kg φ|| / (||Kφ|| + |λ| ||Kg φ||). Reported beside the K-norm residual. */
+  residualBalanced: number
+  /** Lowest |λ| pairs from the subspace, positive and negative, with both residuals. */
+  spectrum: { lambda: number; residual: number; residualBalanced: number }[]
+  /** Target for ||Kφ − λ Kg φ|| / ||Kφ||. A larger residual is reported, not hidden. */
+  solverTolerance: number
+  seconds: number
+  mesh: FemMeshLine[]
+  formulation: string
+  note: string
+  prestressNote: string
+  stiffenerNotes: string[]
+  minAspect: number
+  maxElementMm: number
+  minElementMm: number
+  symmetryNote: string
+  /** Recovered patch membrane stress at element centres, compression positive. Null when there is no patch. */
+  membrane: { sigX: number[]; sigY: number[]; tau: number[] } | null
+}
+
+export type MeshRow = {
+  nx: number
+  ny: number
+  elements: number
+  dof: number
+  freeDof: number
+  lambda: number | null
+  criticalMpa: number | null
+  changePct: number | null
+  /** MAC of mode 1 against the previous mesh. Null on the first row. */
+  mac: number | null
+  wavesX: number | null
+  wavesY: number | null
+  seconds: number
+  status: string
+}
+
+export type MeshStudy = {
+  rows: MeshRow[]
+  converged: boolean
+  tolerancePct: number
+  note: string
+}
+
+export const MESH_STUDY_SIZES = [10, 20, 40, 80] as const
+export const CONVERGENCE_TOLERANCE = 0.01
+const MAX_ELEMENTS = 80
+const RIGID_FACTOR = 1e4
+const G3 = 1 / Math.sqrt(3)
+
+function shape(xi: number, eta: number) {
+  const corners = [
+    { x: -1, y: -1 },
+    { x: 1, y: -1 },
+    { x: 1, y: 1 },
+    { x: -1, y: 1 },
+  ]
+  return corners.map((p) => ({
+    n: 0.25 * (1 + p.x * xi) * (1 + p.y * eta),
+    dxi: 0.25 * p.x * (1 + p.y * eta),
+    deta: 0.25 * p.y * (1 + p.x * xi),
+  }))
+}
+
+function denseCholesky(A: Float64Array, n: number): Float64Array | null {
+  const L = new Float64Array(n * n)
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j <= i; j++) {
+      let sum = A[i * n + j]!
+      for (let k = 0; k < j; k++) sum -= L[i * n + k]! * L[j * n + k]!
+      if (i === j) {
+        if (!(sum > 0)) return null
+        L[i * n + i] = Math.sqrt(sum)
+      } else L[i * n + j] = sum / L[j * n + j]!
+    }
+  }
+  return L
+}
+
+function projectEigen(Kp: number[][], Gp: number[][]): { values: number[]; vectors: number[][] } | null {
+  const n = Kp.length
+  const kFlat = new Float64Array(n * n)
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) kFlat[i * n + j] = Kp[i]![j]!
+  const L = denseCholesky(kFlat, n)
+  if (!L) return null
+  const W = Array.from({ length: n }, () => new Float64Array(n))
+  for (let col = 0; col < n; col++) {
+    const y = new Float64Array(n)
+    for (let i = 0; i < n; i++) {
+      let sum = Gp[i]![col]!
+      for (let k = 0; k < i; k++) sum -= L[i * n + k]! * y[k]!
+      y[i] = sum / L[i * n + i]!
+    }
+    for (let i = 0; i < n; i++) W[i]![col] = y[i]!
+  }
+  const inv = Array.from({ length: n }, () => new Float64Array(n))
+  for (let col = 0; col < n; col++) {
+    const y = new Float64Array(n)
+    for (let i = 0; i < n; i++) {
+      let sum = i === col ? 1 : 0
+      for (let k = 0; k < i; k++) sum -= L[i * n + k]! * y[k]!
+      y[i] = sum / L[i * n + i]!
+    }
+    for (let row = 0; row < n; row++) inv[row]![col] = y[row]!
+  }
+  const C = Array.from({ length: n }, () => Array(n).fill(0))
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      let sum = 0
+      for (let k = 0; k < n; k++) sum += W[i]![k]! * inv[j]![k]!
+      C[i]![j] = sum
+    }
+  }
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const s = 0.5 * (C[i]![j]! + C[j]![i]!)
+    C[i]![j] = s
+    C[j]![i] = s
+  }
+  const solved = jacobiSym(C)
+  const qVecs = solved.vectors.map((z) => {
+    const q = Array(n).fill(0)
+    for (let i = n - 1; i >= 0; i--) {
+      let sum = z[i]!
+      for (let k = i + 1; k < n; k++) sum -= L[k * n + i]! * q[k]!
+      q[i] = sum / L[i * n + i]!
+    }
+    return q
+  })
+  return { values: solved.values, vectors: qVecs }
+}
+
+function jacobiSym(matrix: number[][]): { values: number[]; vectors: number[][] } {
+  const n = matrix.length
+  const A = matrix.map((row) => row.slice())
+  const V = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0) as number))
+  for (let sweep = 0; sweep < 80; sweep++) {
+    let p = 0
+    let q = 1
+    let max = 0
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const v = Math.abs(A[i]![j]!)
+        if (v > max) { max = v; p = i; q = j }
+      }
+    }
+    if (max < 1e-14) break
+    const app = A[p]![p]!
+    const aqq = A[q]![q]!
+    const apq = A[p]![q]!
+    let t: number
+    if (Math.abs(app - aqq) <= 1e-18 * (Math.abs(app) + Math.abs(aqq) + 1)) t = apq >= 0 ? 1 : -1
+    else {
+      const tau = (aqq - app) / (2 * apq)
+      t = Math.sign(tau) / (Math.abs(tau) + Math.hypot(1, tau))
+    }
+    const c = 1 / Math.hypot(1, t)
+    const s = t * c
+    A[p]![p] = app - t * apq
+    A[q]![q] = aqq + t * apq
+    A[p]![q] = 0
+    A[q]![p] = 0
+    for (let k = 0; k < n; k++) {
+      const vip = V[k]![p]!
+      const viq = V[k]![q]!
+      V[k]![p] = c * vip - s * viq
+      V[k]![q] = s * vip + c * viq
+      if (k === p || k === q) continue
+      const aik = A[k]![p]!
+      const akq = A[k]![q]!
+      const nextP = c * aik - s * akq
+      const nextQ = s * aik + c * akq
+      A[k]![p] = nextP
+      A[p]![k] = nextP
+      A[k]![q] = nextQ
+      A[q]![k] = nextQ
+    }
+  }
+  const values = A.map((row, i) => row[i]!)
+  const vectors = values.map((_, col) => V.map((row) => row[col]!))
+  return { values, vectors }
+}
+
+function restrain(kind: EdgeKind, mask: { w: boolean; bx: boolean; by: boolean }) {
+  if (kind === "free") return
+  mask.w = true
+  if (kind === "fixed") { mask.bx = true; mask.by = true }
+}
+
+function stations(length: number, divisions: number, cuts: number[]): number[] {
+  const raw = [0]
+  for (let i = 1; i < divisions; i++) raw.push((length * i) / divisions)
+  raw.push(length)
+  for (const cut of cuts) {
+    if (cut > length * 1e-5 && cut < length * (1 - 1e-5)) raw.push(cut)
+  }
+  raw.sort((p, q) => p - q)
+  const out: number[] = []
+  for (const value of raw) {
+    if (out.length === 0 || value - out[out.length - 1]! > Math.max(1e-4, length * 1e-6)) out.push(value)
+  }
+  return out
+}
+
+function tauAt(y: number, input: FemInput): number {
+  const samples = input.tauSamples
+  if (samples && samples.length >= 2) {
+    const ordered = [...samples].sort((p, q) => p.yMm - q.yMm)
+    if (y <= ordered[0]!.yMm) return ordered[0]!.tauMpa
+    const last = ordered[ordered.length - 1]!
+    if (y >= last.yMm) return last.tauMpa
+    for (let i = 1; i < ordered.length; i++) {
+      const right = ordered[i]!
+      const left = ordered[i - 1]!
+      if (y <= right.yMm) {
+        const span = right.yMm - left.yMm
+        const t = span === 0 ? 0 : (y - left.yMm) / span
+        return left.tauMpa + t * (right.tauMpa - left.tauMpa)
+      }
+    }
+  }
+  return input.tauMpa
+}
+
+function sigmaYAt(x: number, y: number, input: FemInput): number {
+  let stress = input.sigmaYMpa ?? 0
+  for (const patch of input.patches ?? []) {
+    const x0 = Math.min(patch.x0, patch.x1)
+    const x1 = Math.max(patch.x0, patch.x1)
+    const y0 = Math.min(patch.y0, patch.y1)
+    const y1 = Math.max(patch.y0, patch.y1)
+    if (x >= x0 && x <= x1 && y >= y0 && y <= y1) stress += patch.sigmaYMpa
+  }
+  return stress
+}
+
+export function countHalfWaves(w: number[], xs: number[], ys: number[], axis: "x" | "y"): number {
+  if (w.length !== xs.length * ys.length || xs.length < 2 || ys.length < 2) return 0
+  const fractions = [0.5, 0.25, 0.75]
+  let bestCount = 0
+  let bestPeak = -1
+  for (const fraction of fractions) {
+    const line: number[] = []
+    if (axis === "x") {
+      const iy = Math.min(ys.length - 1, Math.max(0, Math.round((ys.length - 1) * fraction)))
+      for (let ix = 0; ix < xs.length; ix++) line.push(w[iy * xs.length + ix] ?? 0)
+    } else {
+      const ix = Math.min(xs.length - 1, Math.max(0, Math.round((xs.length - 1) * fraction)))
+      for (let iy = 0; iy < ys.length; iy++) line.push(w[iy * xs.length + ix] ?? 0)
+    }
+    let peak = 0
+    for (const value of line) peak = Math.max(peak, Math.abs(value))
+    if (peak <= bestPeak) continue
+    const floor = peak * 1e-4
+    let changes = 0
+    let prev = 0
+    let have = false
+    for (const value of line) {
+      if (Math.abs(value) <= floor) continue
+      if (have && prev * value < 0) changes += 1
+      prev = value
+      have = true
+    }
+    bestPeak = peak
+    bestCount = have ? changes + 1 : 0
+  }
+  return bestCount
+}
+
+export function meshLines(aMm: number, bMm: number, nx: number, ny: number): FemMeshLine[] {
+  return previewMesh(aMm, bMm, nx, ny)
+}
+
+export function previewMesh(aMm: number, bMm: number, nx: number, ny: number, xCuts: number[] = [], yCuts: number[] = []): FemMeshLine[] {
+  if (!(aMm > 0 && bMm > 0) || nx < 2 || ny < 2 || nx > MAX_ELEMENTS || ny > MAX_ELEMENTS) return []
+  return meshFromCoords(stations(aMm, nx, xCuts), stations(bMm, ny, yCuts))
+}
+
+export function meshFromCoords(xs: number[], ys: number[]): FemMeshLine[] {
+  const lines: FemMeshLine[] = []
+  const y0 = ys[0] ?? 0
+  const y1 = ys[ys.length - 1] ?? 0
+  const x0 = xs[0] ?? 0
+  const x1 = xs[xs.length - 1] ?? 0
+  for (const x of xs) lines.push({ x1: x, y1: y0, x2: x, y2: y1 })
+  for (const y of ys) lines.push({ x1: x0, y1: y, x2: x1, y2: y })
+  return lines
+}
+
+function blank(reason: string): FemResult {
+  return {
+    ok: false, reason, elements: 0, nodes: 0, dof: 0, freeDof: 0, nx: 0, ny: 0,
+    xs: [], ys: [], elementAspect: 0, aspectWarning: "", modes: [],
+    iterations: 0, residual: 0, residualBalanced: 0, spectrum: [], solverTolerance: 1e-8, seconds: 0, mesh: [], formulation: "", note: "", prestressNote: "", stiffenerNotes: [],
+    minAspect: 0, maxElementMm: 0, minElementMm: 0, symmetryNote: "", membrane: null,
+  }
+}
+
+function nearestIndex(coords: number[], value: number): number {
+  let best = 0
+  let dist = Infinity
+  coords.forEach((coord, index) => {
+    const d = Math.abs(coord - value)
+    if (d < dist) { dist = d; best = index }
+  })
+  return best
+}
+
+export function solvePlateFem(input: FemInput): FemResult {
+  const started = Date.now()
+  const nxIn = Math.round(input.nx)
+  const nyIn = Math.round(input.ny)
+  if (nxIn < 2 || nyIn < 2 || nxIn > MAX_ELEMENTS || nyIn > MAX_ELEMENTS) return blank(`Use between 2 and ${MAX_ELEMENTS} elements on each side.`)
+  if (!(input.aMm > 0 && input.bMm > 0 && input.tMm > 0 && input.eMpa > 0)) return blank("Plate size and E must be positive.")
+  if (!(input.nu > 0 && input.nu < 0.5)) return blank("Poisson's ratio must be between 0 and 0.5.")
+  const stiffeners = input.stiffeners ?? []
+  const patch = input.patchLoad
+  if (patch) {
+    const len = patch.edge === "x0" || patch.edge === "x1" ? input.bMm : input.aMm
+    const interval = patchInterval(patch, len)
+    if (typeof interval === "string") return blank(interval)
+  }
+  const patchCuts = patch && patch.lengthMm > 0 ? [patch.atMm - patch.lengthMm / 2, patch.atMm + patch.lengthMm / 2] : []
+  const xs = stations(input.aMm, nxIn, [
+    ...stiffeners.filter((item) => item.axis === "y").map((item) => item.atMm),
+    ...(patch && (patch.edge === "y0" || patch.edge === "y1") ? patchCuts : []),
+  ])
+  const ys = stations(input.bMm, nyIn, [
+    ...stiffeners.filter((item) => item.axis === "x").map((item) => item.atMm),
+    ...(patch && (patch.edge === "x0" || patch.edge === "x1") ? patchCuts : []),
+  ])
+  const nx = xs.length - 1
+  const ny = ys.length - 1
+  if (nx > MAX_ELEMENTS || ny > MAX_ELEMENTS) return blank(`The mesh plus stiffener lines needs ${nx} × ${ny} elements. The limit is ${MAX_ELEMENTS} on a side.`)
+  const nodesX = nx + 1
+  const nodesY = ny + 1
+  const nodes = nodesX * nodesY
+  const ndof = nodes * 3
+  let maxAspect = 1
+  let minAspect = Infinity
+  let minElementMm = Infinity
+  let maxElementMm = 0
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const ae = xs[ix + 1]! - xs[ix]!
+      const be = ys[iy + 1]! - ys[iy]!
+      const ratio = ae > be ? ae / be : be / ae
+      if (ratio > maxAspect) maxAspect = ratio
+      if (ratio < minAspect) minAspect = ratio
+      minElementMm = Math.min(minElementMm, ae, be)
+      maxElementMm = Math.max(maxElementMm, ae, be)
+    }
+  }
+  if (!Number.isFinite(minAspect)) minAspect = 1
+  const aspectWarning = maxAspect > 3 ? `An element aspect ratio reaches ${maxAspect.toFixed(2)}. Above 3 the eigenvalue is less trustworthy.` : ""
+  const free = new Int32Array(ndof).fill(-1)
+  const keep: number[] = []
+  for (let iy = 0; iy < nodesY; iy++) {
+    for (let ix = 0; ix < nodesX; ix++) {
+      const mask = { w: false, bx: false, by: false }
+      if (ix === 0) restrain(input.edges.x0, mask)
+      if (ix === nx) restrain(input.edges.x1, mask)
+      if (iy === 0) restrain(input.edges.y0, mask)
+      if (iy === ny) restrain(input.edges.y1, mask)
+      const node = iy * nodesX + ix
+      for (let local = 0; local < 3; local++) {
+        const held = local === 0 ? mask.w : local === 1 ? mask.bx : mask.by
+        if (!held) {
+          free[node * 3 + local] = keep.length
+          keep.push(node * 3 + local)
+        }
+      }
+    }
+  }
+  const n = keep.length
+  if (n < 6) return blank("Not enough free degrees of freedom.")
+  const bw = 3 * nodesX + 6
+  const refStress = Math.max(
+    Math.abs(input.sigma1Mpa),
+    Math.abs(input.tauMpa),
+    Math.abs(input.sigmaYMpa ?? 0),
+    ...(input.tauSamples ?? []).map((sample) => Math.abs(sample.tauMpa)),
+    ...(input.patches ?? []).map((item) => Math.abs(item.sigmaYMpa)),
+    patch && patch.forceN !== 0 ? 1 : 0,
+  )
+  if (!(refStress > 0)) return blank("Set a non-zero stress or a patch force before running the eigenvalue solve.")
+  const s0 = input.sigma1Mpa
+  const sB = input.sigma1Mpa * input.psi
+  const compressive = Math.max(s0, sB, input.sigmaYMpa ?? 0)
+  const shearPresent = Math.abs(input.tauMpa) > 1e-9 || (input.tauSamples ?? []).some((sample) => Math.abs(sample.tauMpa) > 1e-9)
+  const patchPushes = Boolean(patch && patch.forceN > 0)
+  if (!shearPresent && !patchPushes && compressive <= 1e-9 && (Math.abs(s0) > 1e-9 || Math.abs(sB) > 1e-9 || (patch && patch.forceN < 0))) {
+    return blank("The direct stress is tensile and there is no compressive patch or shear. This is not a compression-buckling case.")
+  }
+  let pre: Prestress | null = null
+  if (patch && patch.forceN !== 0) {
+    pre = solvePatchPrestress({ xs, ys, tMm: input.tMm, eMpa: input.eMpa, nu: input.nu, patch })
+    if (!pre.ok) return blank(pre.reason)
+  }
+  const D = (input.eMpa * input.tMm ** 3) / (12 * (1 - input.nu ** 2))
+  const Gmod = input.eMpa / (2 * (1 + input.nu))
+  const Db = [[D, D * input.nu, 0], [D * input.nu, D, 0], [0, 0, D * (1 - input.nu) / 2]]
+  const Ds = (5 / 6) * Gmod * input.tMm
+  const K = new Float64Array(n * bw)
+  const Kg = new Float64Array(n * bw)
+  let symAbs = 0
+  let symScale = 0
+  const gp2 = [-G3, G3]
+  const scatter12 = (ke: Float64Array, kg: Float64Array, ids: number[]) => {
+    for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
+      for (let ia = 0; ia < 3; ia++) for (let ib = 0; ib < 3; ib++) {
+        const fi = free[ids[a]! * 3 + ia]!
+        const fj = free[ids[b]! * 3 + ib]!
+        if (fi < 0 || fj < 0 || fi < fj) continue
+        const slot = (a * 3 + ia) * 12 + (b * 3 + ib)
+        bandAdd(K, bw, fi, fj, ke[slot]!)
+        bandAdd(Kg, bw, fi, fj, kg[slot]!)
+      }
+    }
+  }
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const ae = xs[ix + 1]! - xs[ix]!
+      const be = ys[iy + 1]! - ys[iy]!
+      const ids = [iy * nodesX + ix, iy * nodesX + ix + 1, (iy + 1) * nodesX + ix + 1, (iy + 1) * nodesX + ix]
+      const eIndex = iy * nx + ix
+      const preX = pre ? pre.sigX[eIndex]! : 0
+      const preY = pre ? pre.sigY[eIndex]! : 0
+      const preT = pre ? pre.tau[eIndex]! : 0
+      const xN = [xs[ix]!, xs[ix + 1]!, xs[ix + 1]!, xs[ix]!]
+      const yN = [ys[iy]!, ys[iy]!, ys[iy + 1]!, ys[iy + 1]!]
+      const ke = new Float64Array(144)
+      const kg = new Float64Array(144)
+      const accum = (xi: number, eta: number, wt: number, shear: boolean, bend: boolean, geo: boolean) => {
+        const sh = shape(xi, eta)
+        const detJ = (ae / 2) * (be / 2)
+        const dNdx = sh.map((p) => p.dxi * (2 / ae))
+        const dNdy = sh.map((p) => p.deta * (2 / be))
+        if (bend) {
+          const Bb = [new Float64Array(12), new Float64Array(12), new Float64Array(12)]
+          for (let i = 0; i < 4; i++) {
+            Bb[0]![i * 3 + 1] = dNdx[i]!
+            Bb[1]![i * 3 + 2] = dNdy[i]!
+            Bb[2]![i * 3 + 1] = dNdy[i]!
+            Bb[2]![i * 3 + 2] = dNdx[i]!
+          }
+          for (let a = 0; a < 12; a++) for (let b = 0; b < 12; b++) {
+            let s = 0
+            for (let p = 0; p < 3; p++) for (let q = 0; q < 3; q++) s += Bb[p]![a]! * Db[p]![q]! * Bb[q]![b]!
+            ke[a * 12 + b] += s * detJ * wt
+          }
+        }
+        if (shear) {
+          const Bs0 = new Float64Array(12)
+          const Bs1 = new Float64Array(12)
+          for (let i = 0; i < 4; i++) {
+            Bs0[i * 3] = dNdx[i]!
+            Bs0[i * 3 + 1] = -sh[i]!.n
+            Bs1[i * 3] = dNdy[i]!
+            Bs1[i * 3 + 2] = -sh[i]!.n
+          }
+          for (let a = 0; a < 12; a++) for (let b = 0; b < 12; b++) {
+            ke[a * 12 + b] += Ds * (Bs0[a]! * Bs0[b]! + Bs1[a]! * Bs1[b]!) * detJ * wt
+          }
+        }
+        if (!geo) return
+        let xPhys = 0
+        let yPhys = 0
+        for (let i = 0; i < 4; i++) {
+          xPhys += sh[i]!.n * xN[i]!
+          yPhys += sh[i]!.n * yN[i]!
+        }
+        const sig = input.sigma1Mpa * (1 - (1 - input.psi) * (yPhys / input.bMm)) + preX
+        const tau = tauAt(yPhys, input) + preT
+        const sigY = sigmaYAt(xPhys, yPhys, input) + preY
+        const gx = new Float64Array(12)
+        const gy = new Float64Array(12)
+        for (let i = 0; i < 4; i++) { gx[i * 3] = dNdx[i]!; gy[i * 3] = dNdy[i]! }
+        const s00 = input.tMm * sig
+        const s01 = input.tMm * tau
+        const s11 = input.tMm * sigY
+        for (let a = 0; a < 12; a++) for (let b = 0; b < 12; b++) {
+          kg[a * 12 + b] += (gx[a]! * (s00 * gx[b]! + s01 * gy[b]!) + gy[a]! * (s01 * gx[b]! + s11 * gy[b]!)) * detJ * wt
+        }
+      }
+      for (const xi of gp2) for (const eta of gp2) accum(xi, eta, 1, false, true, true)
+      accum(0, 0, 4, true, false, false)
+      for (let a = 0; a < 12; a++) for (let b = a + 1; b < 12; b++) {
+        const dke = Math.abs(ke[a * 12 + b]! - ke[b * 12 + a]!)
+        const dkg = Math.abs(kg[a * 12 + b]! - kg[b * 12 + a]!)
+        symAbs = Math.max(symAbs, dke, dkg)
+        symScale = Math.max(symScale, Math.abs(ke[a * 12 + b]!), Math.abs(kg[a * 12 + b]!))
+      }
+      scatter12(ke, kg, ids)
+    }
+  }
+  if (input.krNPerRadPerMm > 0) {
+    const kr = input.krNPerRadPerMm
+    const spring = (kind: EdgeKind, length: number, node: number, which: 1 | 2) => {
+      if (kind !== "elastic") return
+      const f = free[node * 3 + which]!
+      if (f >= 0) bandAdd(K, bw, f, f, (kr * length) / 2)
+    }
+    for (let iy = 0; iy < nodesY; iy++) {
+      const length = iy === 0 || iy === ny ? (iy === 0 ? ys[1]! - ys[0]! : ys[ny]! - ys[ny - 1]!) : 0.5 * ((ys[iy]! - ys[iy - 1]!) + (ys[iy + 1]! - ys[iy]!))
+      spring(input.edges.x0, length, iy * nodesX, 1)
+      spring(input.edges.x1, length, iy * nodesX + nx, 1)
+    }
+    for (let ix = 0; ix < nodesX; ix++) {
+      const length = ix === 0 || ix === nx ? (ix === 0 ? xs[1]! - xs[0]! : xs[nx]! - xs[nx - 1]!) : 0.5 * ((xs[ix]! - xs[ix - 1]!) + (xs[ix + 1]! - xs[ix]!))
+      spring(input.edges.y0, length, ix, 2)
+      spring(input.edges.y1, length, ny * nodesX + ix, 2)
+    }
+  }
+  const stiffenerNotes: string[] = []
+  const seen = new Set<string>()
+  for (const beam of stiffeners) {
+    if (beam.axis === "x" && (beam.atMm <= 1e-6 || beam.atMm >= input.bMm - 1e-6)) {
+      stiffenerNotes.push(`${beam.id}: y is on or outside the plate, so the beam is not added. An edge line is not turned into an extra panel.`)
+      continue
+    }
+    if (beam.axis === "y" && (beam.atMm <= 1e-6 || beam.atMm >= input.aMm - 1e-6)) {
+      stiffenerNotes.push(`${beam.id}: x is on or outside the plate, so the beam is not added. An edge line is not turned into an extra panel.`)
+      continue
+    }
+    const key = `${beam.axis}:${beam.atMm.toFixed(3)}`
+    if (seen.has(key)) stiffenerNotes.push(`${beam.id}: coincident with another stiffener. Both sit on one mesh line and their stiffness adds. No extra panel is created.`)
+    seen.add(key)
+  }
+  const preAt = (x: number, y: number) => {
+    if (!pre) return { sigX: 0, sigY: 0 }
+    let ix = 0
+    let iy = 0
+    while (ix < nx - 1 && xs[ix + 1]! < x) ix += 1
+    while (iy < ny - 1 && ys[iy + 1]! < y) iy += 1
+    return { sigX: pre.sigX[iy * nx + ix]!, sigY: pre.sigY[iy * nx + ix]! }
+  }
+  for (const beam of stiffeners) {
+    if (!(beam.eiNmm2 > 0)) {
+      stiffenerNotes.push(`${beam.id}: no EI, drawn only.`)
+      continue
+    }
+    if (beam.axis === "x" && (beam.atMm <= 1e-6 || beam.atMm >= input.bMm - 1e-6)) continue
+    if (beam.axis === "y" && (beam.atMm <= 1e-6 || beam.atMm >= input.aMm - 1e-6)) continue
+    const factor = beam.rigid ? RIGID_FACTOR : 1
+    const ei = beam.eiNmm2 * factor
+    const gj = Math.max(0, beam.gjNmm2) * factor
+    if (beam.axis === "x") {
+      const iy = nearestIndex(ys, beam.atMm)
+      const y = ys[iy]!
+      const sig = input.sigma1Mpa * (1 - (1 - input.psi) * (y / input.bMm)) + preAt(input.aMm / 2, y).sigX
+      const axial = sig * beam.areaMm2
+      for (let ix = 0; ix < nx; ix++) addBeam(K, Kg, bw, free, iy * nodesX + ix, iy * nodesX + ix + 1, "x", xs[ix + 1]! - xs[ix]!, ei, gj, axial)
+      stiffenerNotes.push(`${beam.id}: longitudinal beam on mesh line y = ${y.toFixed(2)} mm (entered ${beam.atMm} mm). ${beam.rigid ? "EI and GJ scaled by 10000 for a rigid comparison." : "EI and GJ as entered."} Beam Kg uses N = σx A.`)
+    } else {
+      const ix = nearestIndex(xs, beam.atMm)
+      const x = xs[ix]!
+      for (let iy = 0; iy < ny; iy++) {
+        const y = 0.5 * (ys[iy]! + ys[iy + 1]!)
+        addBeam(K, Kg, bw, free, iy * nodesX + ix, (iy + 1) * nodesX + ix, "y", ys[iy + 1]! - ys[iy]!, ei, gj, (sigmaYAt(x, y, input) + preAt(x, y).sigY) * beam.areaMm2)
+      }
+      stiffenerNotes.push(`${beam.id}: transverse beam on mesh line x = ${x.toFixed(2)} mm (entered ${beam.atMm} mm). Beam Kg uses N = σy A.`)
+    }
+  }
+  if (stiffeners.length > 0) {
+    const liveLong = stiffeners.filter((beam) => beam.axis === "x" && beam.atMm > 1e-6 && beam.atMm < input.bMm - 1e-6 && beam.eiNmm2 > 0)
+    const liveTrans = stiffeners.filter((beam) => beam.axis === "y" && beam.atMm > 1e-6 && beam.atMm < input.aMm - 1e-6 && beam.eiNmm2 > 0)
+    for (const along of liveLong) {
+      for (const across of liveTrans) {
+        const iy = nearestIndex(ys, along.atMm)
+        const ix = nearestIndex(xs, across.atMm)
+        stiffenerNotes.push(`SHOW CONNECTION NODES: ${along.id} and ${across.id} share plate node (${ix}, ${iy}) at x = ${xs[ix]!.toFixed(2)} mm, y = ${ys[iy]!.toFixed(2)} mm. w is the common displacement. The longitudinal beam bends with βx and twists with βy. The transverse beam bends with βy and twists with βx.`)
+      }
+    }
+    stiffenerNotes.unshift("SHOW FEM CONNECTIVITY: each line below names the mesh station the beam uses. Coincident stiffeners add EI and GJ on that one line and do not create a panel. A line on the plate edge is not assembled.")
+  }
+  const factor = bandedCholesky(K, n, bw)
+  if (!factor) return blank("Elastic stiffness is singular for this mesh and these restraints.")
+  const sought = Math.min(Math.max(input.modes ?? 4, 1), 6, n)
+  const gradient = Math.abs(input.psi - 1) > 1e-3 && Math.abs(input.sigma1Mpa) > 0
+  const spread = gradient || Math.abs(input.tauMpa) > 0 || (input.tauSamples?.some((sample) => Math.abs(sample.tauMpa) > 0) ?? false) || pre != null
+  const eigen = bucklingModes({
+    K, Kg, factor, n, bw, keep, nodesX, xs, ys,
+    aMm: input.aMm, bMm: input.bMm,
+    maxSteps: Math.max(1, Math.min(n - 1, spread ? 120 : 36)),
+  })
+  if (!eigen.ok) return blank(eigen.reason)
+  const width = Math.max(eigen.columns.length, 1)
+  const X = Array.from({ length: n }, () => new Float64Array(width))
+  const lambdas = eigen.columns.length > 0 ? eigen.lambdas.slice() : [Number.POSITIVE_INFINITY]
+  for (let c = 0; c < eigen.columns.length; c++) {
+    const column = eigen.columns[c]!
+    for (let i = 0; i < n; i++) X[i]![c] = column[i]!
+  }
+  const iters = eigen.iterations
+  const gvec = new Float64Array(n)
+  const rhs = new Float64Array(n)
+  const pairOf = (col: Float64Array, lambda: number) => {
+    bandedMatvec(K, n, bw, col, rhs)
+    bandedMatvec(Kg, n, bw, col, gvec)
+    let num = 0
+    let k2 = 0
+    let g2 = 0
+    for (let i = 0; i < n; i++) {
+      const r = rhs[i]! - lambda * gvec[i]!
+      num += r * r
+      k2 += rhs[i]! * rhs[i]!
+      g2 += gvec[i]! * gvec[i]!
+    }
+    const rn = Math.sqrt(num)
+    const kn = Math.sqrt(k2)
+    const gn = Math.sqrt(g2)
+    const bal = kn + Math.abs(lambda) * gn
+    return { residual: kn > 0 ? rn / kn : 0, residualBalanced: bal > 0 ? rn / bal : 0 }
+  }
+  const colOf = (c: number) => {
+    const column = new Float64Array(n)
+    for (let i = 0; i < n; i++) column[i] = X[i]![c]!
+    return column
+  }
+  const spectrum = lambdas
+    .map((lambda, index) => {
+      if (!Number.isFinite(lambda) || Math.abs(lambda) >= 1e12) return null
+      const pair = pairOf(colOf(index), lambda as number)
+      return { index, lambda: lambda as number, residual: pair.residual, residualBalanced: pair.residualBalanced }
+    })
+    .filter((row): row is { index: number; lambda: number; residual: number; residualBalanced: number } => row != null)
+    .sort((p, q) => Math.abs(p.lambda) - Math.abs(q.lambda))
+  const ranked = spectrum.filter((row) => row.lambda > 1e-8 && row.lambda < 1e12)
+  if (ranked.length === 0) {
+    return blank("No buckling eigenvalue in the sense of the applied field. Reversing the loads may buckle. That reversal is not reported as a compression capacity.")
+  }
+  const leadRow = ranked[0]!
+  const residual = leadRow.residual
+  const residualBalanced = leadRow.residualBalanced
+  const solverTolerance = 1e-8
+  const wantShapes = input.shapes !== false
+  const tauRef = Math.max(Math.abs(input.tauMpa), ...(input.tauSamples ?? []).map((sample) => Math.abs(sample.tauMpa)))
+  const modes: FemMode[] = ranked.slice(0, sought).map((item) => {
+    return {
+      lambda: item.lambda,
+      sigma1CrMpa: Math.abs(input.sigma1Mpa) > 0 ? item.lambda * input.sigma1Mpa : null,
+      sigmaYCrMpa: Math.abs(input.sigmaYMpa ?? 0) > 0 ? item.lambda * (input.sigmaYMpa as number) : null,
+      tauCrMpa: tauRef > 0 ? item.lambda * (input.tauMpa !== 0 ? input.tauMpa : tauRef) : null,
+      patchCrN: patch && patch.forceN !== 0 ? item.lambda * patch.forceN : null,
+      w: wantShapes ? normalisedW(X, item.index, keep, nodes) : [],
+    }
+  })
+  const symRel = symScale > 0 ? symAbs / symScale : 0
+  const symmetryNote = `K AND Kg SYMMETRY. Element matrices are symmetric by construction before scatter. Peak off-diagonal mismatch ${symAbs.toExponential(2)} against scale ${symScale.toExponential(2)}, relative ${symRel.toExponential(2)}. Band storage keeps only the lower triangle, so the global operators used by the solver are symmetric. NUMERICAL SANITY CHECK, not a code check.`
+  const specLine = spectrum.filter((row) => row.lambda > 0).slice(0, 5).map((row, index) => {
+    const partner = spectrum.find((other) => other.lambda < 0 && Math.abs(Math.abs(other.lambda) - row.lambda) / row.lambda < 0.05)
+    return `#${index + 1} λ=${row.lambda.toExponential(4)} r=${row.residual.toExponential(2)} rb=${row.residualBalanced.toExponential(2)}${partner ? ` partner=${partner.lambda.toExponential(4)}` : ""}`
+  }).join("; ")
+  const positiveSpec = spectrum.filter((row) => row.lambda > 0)
+  const separation = positiveSpec.length >= 2 ? (positiveSpec[1]!.lambda - positiveSpec[0]!.lambda) / positiveSpec[0]!.lambda : null
+  return {
+    ok: true,
+    reason: "",
+    elements: nx * ny,
+    nodes,
+    dof: ndof,
+    freeDof: n,
+    nx,
+    ny,
+    xs,
+    ys,
+    elementAspect: maxAspect,
+    aspectWarning,
+    modes,
+    iterations: iters,
+    residual,
+    residualBalanced,
+    spectrum: spectrum.slice(0, 8).map(({ lambda, residual: r, residualBalanced: rb }) => ({ lambda, residual: r, residualBalanced: rb })),
+    solverTolerance,
+    seconds: (Date.now() - started) / 1000,
+    mesh: meshFromCoords(xs, ys),
+    formulation: pre
+      ? "Two-stage. Stage 1: bilinear plane-stress quad, 2×2, for the edge patch. The opposite edge is the normal support. Stage 2: Mindlin bilinear quad, 2×2 bending and geometric stiffness from the recovered membrane stress plus the entered σx, σy and τxy, 1-point shear, ks = 5/6. λ multiplies the whole field."
+      : "Mindlin bilinear quad. 2×2 bending and geometric stiffness, 1-point shear, ks = 5/6. The entered σx(y), σy and τxy are the pre-buckling field. No separate membrane solve. Banded Cholesky of K. Eigenvalues from reorthogonalised Lanczos on L⁻¹ Kg L⁻ᵀ, then a Rayleigh quotient in the original basis. Stiffeners are Euler beams on EI and GJ. Beam Kg uses N = σA.",
+    note: `${engineLine()} NORMALISED EIGENMODE — DISPLAY SCALE IS NOT PHYSICAL DISPLACEMENT. FILTER: the production modes are positive eigenvalues only, smallest first. A negative λ is the same |load| with the membrane field reversed. It stays in the diagnostic spectrum and is not a second compression capacity. ± pairs appear when Kg is indefinite, which pure bending and shear both are. Residual r = ||Kφ − λ Kg φ|| / ||Kφ||. Balanced residual rb = ||Kφ − λ Kg φ|| / (||Kφ|| + |λ| ||Kg φ||). Positive spectrum: ${specLine}. Next positive separation (λ2−λ1)/λ1 = ${separation == null ? "—" : separation.toExponential(3)}. Mesh aspect ${minAspect.toFixed(2)} to ${maxAspect.toFixed(2)}. Element size ${minElementMm.toFixed(2)} to ${maxElementMm.toFixed(2)} mm.${input.sigma1Mpa < 0 ? " σ1,cr is the stress at y = 0 after scaling. A negative value is tension on that edge, not a compressive capacity." : ""}${wantShapes && modes[0] && modes[0].w.length > 0 ? ` Mode 1 centreline half-waves ≈ ${countHalfWaves(modes[0].w, xs, ys, "x")} along x and ${countHalfWaves(modes[0].w, xs, ys, "y")} along y.` : ""} ${symmetryNote}`,
+    prestressNote: pre ? `${pre.note} Equilibrium imbalance ${(pre.equilibrium * 100).toFixed(2)}%.` : "No patch load. Kg uses the entered membrane field only.",
+    stiffenerNotes,
+    minAspect,
+    maxElementMm,
+    minElementMm,
+    symmetryNote,
+    membrane: pre ? { sigX: Array.from(pre.sigX), sigY: Array.from(pre.sigY), tau: Array.from(pre.tau) } : null,
+  }
+}
+
+function normalisedW(X: Float64Array[], column: number, keep: number[], nodes: number): number[] {
+  const w = Array(nodes).fill(0)
+  for (let i = 0; i < keep.length; i++) {
+    const g = keep[i]!
+    if (g % 3 === 0) w[Math.floor(g / 3)] = X[i]![column] ?? 0
+  }
+  let max = 0
+  for (const value of w) max = Math.max(max, Math.abs(value))
+  if (max > 0) for (let i = 0; i < w.length; i++) w[i] /= max
+  return w
+}
+
+function addBeam(K: Float64Array, Kg: Float64Array, bw: number, free: Int32Array, nodeA: number, nodeB: number, axis: "x" | "y", length: number, ei: number, gj: number, axialCompression: number) {
+  if (!(length > 0)) return
+  const bendRot = axis === "x" ? 1 : 2
+  const twistRot = axis === "x" ? 2 : 1
+  const f = ei / length ** 3
+  const ke = [
+    12 * f, 6 * length * f, -12 * f, 6 * length * f,
+    6 * length * f, 4 * length * length * f, -6 * length * f, 2 * length * length * f,
+    -12 * f, -6 * length * f, 12 * f, -6 * length * f,
+    6 * length * f, 2 * length * length * f, -6 * length * f, 4 * length * length * f,
+  ]
+  const scale = axialCompression / (30 * length)
+  const kg = [
+    36 * scale, 3 * length * scale, -36 * scale, 3 * length * scale,
+    3 * length * scale, 4 * length * length * scale, -3 * length * scale, -length * length * scale,
+    -36 * scale, -3 * length * scale, 36 * scale, -3 * length * scale,
+    3 * length * scale, -length * length * scale, -3 * length * scale, 4 * length * length * scale,
+  ]
+  const dofs = [nodeA * 3, nodeA * 3 + bendRot, nodeB * 3, nodeB * 3 + bendRot]
+  for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
+    const fi = free[dofs[a]!]!
+    const fj = free[dofs[b]!]!
+    if (fi < 0 || fj < 0 || fi < fj) continue
+    bandAdd(K, bw, fi, fj, ke[a * 4 + b]!)
+    if (axialCompression !== 0) bandAdd(Kg, bw, fi, fj, kg[a * 4 + b]!)
+  }
+  if (gj > 0) {
+    const t = gj / length
+    const twist = [nodeA * 3 + twistRot, nodeB * 3 + twistRot]
+    const kte = [t, -t, -t, t]
+    for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) {
+      const fi = free[twist[a]!]!
+      const fj = free[twist[b]!]!
+      if (fi < 0 || fj < 0 || fi < fj) continue
+      bandAdd(K, bw, fi, fj, kte[a * 2 + b]!)
+    }
+  }
+}
+
+function criticalOf(result: FemResult): number | null {
+  const mode = result.modes[0]
+  if (!mode) return null
+  if (mode.sigma1CrMpa != null && mode.sigma1CrMpa !== 0) return mode.sigma1CrMpa
+  if (mode.sigmaYCrMpa != null && mode.sigmaYCrMpa !== 0) return mode.sigmaYCrMpa
+  if (mode.tauCrMpa != null) return mode.tauCrMpa
+  if (mode.patchCrN != null) return mode.patchCrN
+  return mode.lambda
+}
+
+export function studyGrids(aMm: number, bMm: number): { nx: number; ny: number }[] {
+  const alpha = bMm > 0 ? aMm / bMm : 1
+  return MESH_STUDY_SIZES.map((n) => {
+    if (alpha >= 1) return { nx: Math.min(MAX_ELEMENTS, Math.max(n, Math.round(n * Math.min(alpha, 6)))), ny: n }
+    return { nx: n, ny: Math.min(MAX_ELEMENTS, Math.max(n, Math.round(n * Math.min(1 / Math.max(alpha, 1e-6), 6)))) }
+  })
+}
+
+export function runMeshStudy(
+  input: FemInput,
+  sizes: number[] = [...MESH_STUDY_SIZES],
+  grids?: { nx: number; ny: number }[],
+  tolerance = CONVERGENCE_TOLERANCE,
+): MeshStudy {
+  const plan = grids && grids.length > 0 ? grids : sizes.map((size) => ({ nx: size, ny: size }))
+  const rows: MeshRow[] = []
+  let previous: FemResult | null = null
+  for (const grid of plan) {
+    const started = Date.now()
+    const result = solvePlateFem({ ...input, nx: grid.nx, ny: grid.ny, shapes: true, modes: 3 })
+    const critical = result.ok ? criticalOf(result) : null
+    const prior = [...rows].reverse().find((row) => row.criticalMpa != null)?.criticalMpa ?? null
+    const change = critical != null && prior != null && prior !== 0 ? (100 * (critical - prior)) / Math.abs(prior) : null
+    const wavesX = result.ok && result.modes[0]?.w.length ? countHalfWaves(result.modes[0].w, result.xs, result.ys, "x") : null
+    const wavesY = result.ok && result.modes[0]?.w.length ? countHalfWaves(result.modes[0].w, result.xs, result.ys, "y") : null
+    const mac = previous?.ok && result.ok && previous.modes[0]?.w.length && result.modes[0]?.w.length
+      ? modeMac(previous.modes[0]!.w, previous.xs, previous.ys, result.modes[0]!.w, result.xs, result.ys)
+      : null
+    rows.push({
+      nx: grid.nx,
+      ny: grid.ny,
+      elements: result.elements,
+      dof: result.dof,
+      freeDof: result.freeDof,
+      lambda: result.ok ? result.modes[0]?.lambda ?? null : null,
+      criticalMpa: critical,
+      changePct: change,
+      mac,
+      wavesX,
+      wavesY,
+      seconds: result.ok ? result.seconds : (Date.now() - started) / 1000,
+      status: result.ok ? "solved" : result.reason,
+    })
+    if (result.ok) previous = result
+  }
+  const solved = rows.filter((row) => row.criticalMpa != null)
+  const change = solved.at(-1)?.changePct
+  const converged = Boolean(solved.length >= 2 && change != null && Math.abs(change) < tolerance * 100)
+  const macLast = solved.at(-1)?.mac
+  const waveChanged = solved.length >= 2 && (solved.at(-1)?.wavesX !== solved.at(-2)?.wavesX || solved.at(-1)?.wavesY !== solved.at(-2)?.wavesY)
+  const modeNote = waveChanged
+    ? " Half-wave count changed between the last two meshes, so eigenvalue proximity is not mode identity."
+    : macLast != null && macLast < 0.9
+      ? ` MAC of mode 1 against the previous mesh is ${macLast.toFixed(3)}. The governing mode may have changed.`
+      : macLast != null
+        ? ` MAC of mode 1 against the previous mesh is ${macLast.toFixed(3)}.`
+        : ""
+  return {
+    rows,
+    converged,
+    tolerancePct: tolerance * 100,
+    note: (converged
+      ? `CONVERGED. The last two meshes differ by less than ${tolerance * 100}% in the reported critical value. This is a mesh check, not a code verification.`
+      : `NOT CONVERGED. Convergence requires two successful meshes and a change below ${tolerance * 100}%.`) + modeNote,
+  }
+}
+
+
+
+========================================================================
+FILE src/plate/fem.worker.ts
+========================================================================
+
+import { runVerification } from "./benchmarks.ts"
+import { runDeepVerification } from "./deep.ts"
+import { runMeshStudy, solvePlateFem, type FemInput } from "./fem.ts"
+
+type Job =
+  | { op: "solve"; input: FemInput }
+  | { op: "study"; input: FemInput; sizes?: number[]; grids?: { nx: number; ny: number }[]; tolerance?: number }
+  | { op: "verify" }
+  | { op: "verify-full" }
+
+self.onmessage = (event: MessageEvent<Job>) => {
+  const job = event.data
+  if (!job || typeof job !== "object" || !("op" in job)) {
+    self.postMessage({ op: "solve", result: { ok: false, reason: "The solver worker expects { op, input }.", modes: [] } })
+    return
+  }
+  if (job.op === "study") {
+    self.postMessage({ op: "study", study: runMeshStudy(job.input, job.sizes, job.grids, job.tolerance) })
+    return
+  }
+  if (job.op === "verify") {
+    self.postMessage({ op: "verify", rows: runVerification() })
+    return
+  }
+  if (job.op === "verify-full") {
+    self.postMessage({ op: "verify", rows: [...runVerification(), ...runDeepVerification()] })
+    return
+  }
+  self.postMessage({ op: "solve", result: solvePlateFem(job.input) })
+}
+
+========================================================================
+FILE src/plate/girder.ts
+========================================================================
+
+/** Load derivation for a doubly symmetric or monosymmetric I-web. Not a plate resistance. */
+
+export type GirderInput = {
+  /** Clear web depth between flanges, mm. */
+  hwMm: number
+  twMm: number
+  bfTopMm: number
+  tfTopMm: number
+  bfBotMm: number
+  tfBotMm: number
+  /** Sagging positive. Compression in the top fibre, N·mm. */
+  momentNmm: number
+  /** Shear force, N. The stress used in the plate is VQ/(I t). */
+  shearN: number
+}
+
+export type StressSample = { yMm: number; sigmaMpa: number; tauMpa: number }
+
+export type GirderStress = {
+  ok: boolean
+  reason: string
+  areaMm2: number
+  iMm4: number
+  yBarFromBottomMm: number
+  sigmaBottomMpa: number | null
+  sigmaTopMpa: number | null
+  psi: number | null
+  tauAvgMpa: number | null
+  tauMaxMpa: number | null
+  samples: StressSample[]
+  note: string
+}
+
+type Piece = { y0: number; y1: number; width: number }
+
+function integrate(pieces: Piece[]): { area: number; moment: number; iAboutZero: number } {
+  let area = 0
+  let moment = 0
+  let iAboutZero = 0
+  for (const piece of pieces) {
+    const h = piece.y1 - piece.y0
+    const a = piece.width * h
+    const yc = 0.5 * (piece.y0 + piece.y1)
+    area += a
+    moment += a * yc
+    iAboutZero += (piece.width * h ** 3) / 12 + a * yc * yc
+  }
+  return { area, moment, iAboutZero }
+}
+
+function firstMomentAbove(pieces: Piece[], yCut: number, yBar: number): number {
+  let q = 0
+  for (const piece of pieces) {
+    const y0 = Math.max(piece.y0, yCut)
+    const y1 = piece.y1
+    if (y1 <= y0) continue
+    const a = piece.width * (y1 - y0)
+    const yc = 0.5 * (y0 + y1)
+    q += a * (yc - yBar)
+  }
+  return q
+}
+
+export function plateGirderWeb(input: GirderInput): GirderStress {
+  const empty = (reason: string): GirderStress => ({
+    ok: false,
+    reason,
+    areaMm2: 0,
+    iMm4: 0,
+    yBarFromBottomMm: 0,
+    sigmaBottomMpa: null,
+    sigmaTopMpa: null,
+    psi: null,
+    tauAvgMpa: null,
+    tauMaxMpa: null,
+    samples: [],
+    note: "",
+  })
+  const { hwMm, twMm, bfTopMm, tfTopMm, bfBotMm, tfBotMm, momentNmm, shearN } = input
+  if (![hwMm, twMm, bfTopMm, tfTopMm, bfBotMm, tfBotMm].every((n) => n > 0)) {
+    return empty("Web and both flanges need positive sizes.")
+  }
+  if (!Number.isFinite(momentNmm) || !Number.isFinite(shearN)) return empty("M* and V* must be numbers.")
+  const pieces: Piece[] = [
+    { y0: 0, y1: tfBotMm, width: bfBotMm },
+    { y0: tfBotMm, y1: tfBotMm + hwMm, width: twMm },
+    { y0: tfBotMm + hwMm, y1: tfBotMm + hwMm + tfTopMm, width: bfTopMm },
+  ]
+  const gross = integrate(pieces)
+  if (!(gross.area > 0)) return empty("Section area is zero.")
+  const yBar = gross.moment / gross.area
+  const i = gross.iAboutZero - gross.area * yBar * yBar
+  if (!(i > 0)) return empty("Second moment is not positive.")
+  const yBottom = tfBotMm
+  const yTop = tfBotMm + hwMm
+  // Sagging M* > 0 compresses the top. Compression is positive in the plate solver.
+  const sigma = (y: number) => (momentNmm * (y - yBar)) / i
+  const sigmaBottom = sigma(yBottom)
+  const sigmaTop = sigma(yTop)
+  const psi = Math.abs(sigmaBottom) > 1e-9 ? sigmaTop / sigmaBottom : 1
+  const samples: StressSample[] = []
+  const steps = 10
+  let tauMax = 0
+  for (let iStep = 0; iStep <= steps; iStep++) {
+    const y = yBottom + ((yTop - yBottom) * iStep) / steps
+    const q = firstMomentAbove(pieces, y, yBar)
+    const tau = (shearN * q) / (i * twMm)
+    tauMax = Math.max(tauMax, Math.abs(tau))
+    samples.push({ yMm: y - tfBotMm, sigmaMpa: sigma(y), tauMpa: tau })
+  }
+  const tauAvg = shearN / (hwMm * twMm)
+  return {
+    ok: true,
+    reason: "",
+    areaMm2: gross.area,
+    iMm4: i,
+    yBarFromBottomMm: yBar,
+    sigmaBottomMpa: sigmaBottom,
+    sigmaTopMpa: sigmaTop,
+    psi,
+    tauAvgMpa: tauAvg,
+    tauMaxMpa: tauMax,
+    samples,
+    note: "LOAD DERIVATION. σ = M* (Y − ȳ) / I with sagging M* positive, so the top of the web is in compression when M* > 0. τ = V* Q / (I tw) on the web. Average web shear V*/(hw tw) is reported separately. This is not a plate resistance.",
+  }
+}
+
+
+========================================================================
+FILE src/plate/independent.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { classicalPlate } from "./classical.ts"
+import { solvePlateFem } from "./fem.ts"
+import { buildPanels } from "./subpanels.ts"
+import { newStiffener } from "./stiffeners.ts"
+
+const SS = { x0: "ss" as const, x1: "ss" as const, y0: "ss" as const, y1: "ss" as const }
+
+/** Independent of classical.ts. k(m) = (m/α + α/m)², minimum m = 1…8. */
+function independentUniform(alpha: number): { k: number; m: number } {
+  let best = Infinity
+  let mBest = 1
+  for (let m = 1; m <= 8; m++) {
+    const k = (m / alpha + alpha / m) ** 2
+    if (k < best) { best = k; mBest = m }
+  }
+  return { k: best, m: mBest }
+}
+
+function independentStress(k: number, e: number, nu: number, t: number, b: number): number {
+  return (k * Math.PI ** 2 * e * (t / b) ** 2) / (12 * (1 - nu * nu))
+}
+
+const steel = { eMpa: 210000, nu: 0.3, fyMpa: 350, fuMpa: 450 }
+
+test("independent square plate k = 4 and σcr", () => {
+  const theory = independentUniform(1)
+  const sigma = independentStress(theory.k, 210000, 0.3, 10, 1000)
+  assert.equal(theory.m, 1)
+  assert.ok(Math.abs(theory.k - 4) < 1e-12)
+  assert.ok(Math.abs(sigma - 75.9200338545) < 1e-6, String(sigma))
+  const app = classicalPlate({ aMm: 1000, bMm: 1000, tMm: 10, ...steel, sigma1Mpa: 100, psi: 1, tauMpa: 0, edges: SS })
+  assert.equal(app.ok, true)
+  assert.ok(app.sigmaCrMpa != null)
+  assert.ok(Math.abs(app.sigmaCrMpa - sigma) / sigma < 1e-9)
+  const fem = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+    nx: 12, ny: 12, edges: SS, krNPerRadPerMm: 0, modes: 2, shapes: true,
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  const got = fem.modes[0]?.sigma1CrMpa ?? 0
+  assert.ok(Math.abs(got - sigma) / sigma < 0.01, String(got))
+  const nx = fem.xs.length
+  const iy = Math.floor((fem.ys.length - 1) / 2)
+  const line = fem.xs.map((_, ix) => fem.modes[0]!.w[iy * nx + ix] ?? 0)
+  const changes = line.reduce((count, value, index) => {
+    const prev = line.slice(0, index).reverse().find((item) => Math.abs(item) > 1e-6)
+    return prev != null && prev * value < 0 ? count + 1 : count
+  }, 0)
+  assert.equal(changes, 0, "square fundamental mode must be a single half-wave")
+})
+
+test("independent aspect ratios pick m, not a forced m = 1", () => {
+  const cases = [
+    { alpha: 0.5, a: 500, m: 1, k: 6.25 },
+    { alpha: 1, a: 1000, m: 1, k: 4 },
+    { alpha: 2, a: 2000, m: 2, k: 4 },
+    { alpha: 4, a: 4000, m: 4, k: 4 },
+  ]
+  for (const item of cases) {
+    const theory = independentUniform(item.alpha)
+    assert.equal(theory.m, item.m)
+    assert.ok(Math.abs(theory.k - item.k) < 1e-9)
+    const sigma = independentStress(theory.k, 210000, 0.3, 10, 1000)
+    const app = classicalPlate({ aMm: item.a, bMm: 1000, tMm: 10, ...steel, sigma1Mpa: 1, psi: 1, tauMpa: 0, edges: SS })
+    assert.equal(app.m, item.m)
+    assert.ok(app.sigmaCrMpa != null && Math.abs(app.sigmaCrMpa - sigma) / sigma < 1e-6)
+  }
+})
+
+test("tensile field is refused", () => {
+  const fem = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: -50, psi: 1, tauMpa: 0,
+    nx: 6, ny: 6, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+  })
+  assert.equal(fem.ok, false)
+  assert.match(fem.reason, /tensile/i)
+})
+
+test("invalid thickness, Poisson and patch are refused", () => {
+  const common = { aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 4, ny: 4, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false }
+  assert.equal(solvePlateFem({ ...common, tMm: 0 }).ok, false)
+  assert.equal(solvePlateFem({ ...common, tMm: -2 }).ok, false)
+  assert.equal(solvePlateFem({ ...common, nu: 0.6 }).ok, false)
+  assert.equal(solvePlateFem({ ...common, aMm: 0 }).ok, false)
+  assert.equal(solvePlateFem({ ...common, sigma1Mpa: 0, patchLoad: { edge: "y1", atMm: 100, lengthMm: 0, forceN: 1000 } }).ok, false)
+  assert.equal(solvePlateFem({ ...common, sigma1Mpa: 0, patchLoad: { edge: "y1", atMm: 50, lengthMm: 200, forceN: 1000 } }).ok, false)
+  assert.equal(solvePlateFem({ ...common, nx: 200 }).ok, false)
+})
+
+test("full-edge patch matches independent uniaxial compression", () => {
+  const sigma = independentStress(4, 210000, 0.3, 10, 1000)
+  const force = sigma * 1000 * 10
+  const fem = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 0, psi: 1, tauMpa: 0,
+    nx: 12, ny: 12, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    patchLoad: { edge: "y1", atMm: 500, lengthMm: 1000, forceN: 10000 },
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  const got = fem.modes[0]?.patchCrN ?? 0
+  const expectForce = 10000 * (sigma / 1)
+  assert.ok(Math.abs(got - expectForce) / expectForce < 0.01, `${got} vs ${expectForce}`)
+  assert.ok(Math.abs(force - expectForce) / force < 1e-9)
+})
+
+test("mirrored patch positions match", () => {
+  const run = (at: number) => solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 0, psi: 1, tauMpa: 0,
+    nx: 10, ny: 10, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    patchLoad: { edge: "y1", atMm: at, lengthMm: 200, forceN: 20000 },
+  })
+  const left = run(300)
+  const right = run(700)
+  assert.equal(left.ok && right.ok, true, left.reason || right.reason)
+  const a = left.modes[0]?.patchCrN ?? 0
+  const b = right.modes[0]?.patchCrN ?? 0
+  assert.ok(Math.abs(a - b) / Math.max(Math.abs(a), 1) < 0.02, `${a} vs ${b}`)
+})
+
+test("shorter patch at the same force is more severe", () => {
+  const run = (length: number, at: number) => solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 0, psi: 1, tauMpa: 0,
+    nx: 12, ny: 12, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    patchLoad: { edge: "y1", atMm: at, lengthMm: length, forceN: 20000 },
+  })
+  const short = run(200, 500)
+  const long = run(800, 500)
+  assert.equal(short.ok && long.ok, true, short.reason || long.reason)
+  const fs = short.modes[0]?.patchCrN ?? 0
+  const fl = long.modes[0]?.patchCrN ?? 0
+  assert.ok(fs < fl, `short ${fs} should be below long ${fl}`)
+  assert.match(short.prestressNote, /Requested patch force/)
+  assert.match(short.prestressNote, /Difference 0\.0000%/)
+})
+
+test("full-edge patch stress matches uniform σy on the same mesh", () => {
+  const base = {
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 0, psi: 1, tauMpa: 0,
+    nx: 8, ny: 8, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+  }
+  const uniform = solvePlateFem({ ...base, sigmaYMpa: 1 })
+  const patch = solvePlateFem({
+    ...base,
+    patchLoad: { edge: "y1", atMm: 500, lengthMm: 1000, forceN: 20000 },
+  })
+  assert.equal(uniform.ok && patch.ok, true, uniform.reason || patch.reason)
+  const sigma = (patch.modes[0]?.patchCrN ?? 0) / (1000 * 10)
+  const ref = uniform.modes[0]?.sigmaYCrMpa ?? 0
+  assert.ok(Math.abs(sigma - ref) / ref < 0.01, `${sigma} vs ${ref}`)
+  assert.match(patch.prestressNote, /Difference 0\.0000%/)
+})
+
+test("subpanel counts for one, two and crossed stiffeners", () => {
+  const base = { aMm: 1000, bMm: 600, tMm: 10, ...steel, sigma1Mpa: 100, psi: -1, tauMpa: 0, edges: SS }
+  const one = buildPanels({ ...base, stiffeners: [newStiffener({ id: "S1", axis: "x", atMm: 300 })] })
+  assert.equal(one.length, 2)
+  assert.equal(one.every((panel) => panel.closedForm), false)
+  const two = buildPanels({ ...base, stiffeners: [newStiffener({ id: "S1", axis: "x", atMm: 200 }), newStiffener({ id: "S2", axis: "x", atMm: 400 })] })
+  assert.equal(two.length, 3)
+  assert.ok(Math.abs(two.reduce((sum, panel) => sum + panel.bMm, 0) - 600) < 1e-6)
+  const cross = buildPanels({
+    ...base,
+    stiffeners: [newStiffener({ id: "L", axis: "x", atMm: 300 }), newStiffener({ id: "T", axis: "y", atMm: 400 })],
+  })
+  assert.equal(cross.length, 4)
+  const grid = buildPanels({
+    ...base,
+    stiffeners: [
+      newStiffener({ id: "L1", axis: "x", atMm: 200 }),
+      newStiffener({ id: "L2", axis: "x", atMm: 400 }),
+      newStiffener({ id: "T1", axis: "y", atMm: 300 }),
+      newStiffener({ id: "T2", axis: "y", atMm: 700 }),
+    ],
+  })
+  assert.equal(grid.length, 9)
+  const edge = buildPanels({ ...base, stiffeners: [newStiffener({ id: "E", axis: "x", atMm: 0 })] })
+  assert.equal(edge.length, 1)
+  const same = buildPanels({ ...base, stiffeners: [newStiffener({ id: "A", axis: "x", atMm: 300 }), newStiffener({ id: "B", axis: "x", atMm: 300 })] })
+  assert.equal(same.length, 2)
+})
+
+test("thickness scales with t squared — mm and MPa, no hidden unit factor", () => {
+  const thin = independentStress(4, 210000, 0.3, 10, 1000)
+  const thick = independentStress(4, 210000, 0.3, 20, 1000)
+  assert.ok(Math.abs(thick / thin - 4) < 1e-12)
+  const app = classicalPlate({ aMm: 1000, bMm: 1000, tMm: 20, ...steel, sigma1Mpa: 1, psi: 1, tauMpa: 0, edges: SS })
+  assert.ok(app.sigmaCrMpa != null && Math.abs(app.sigmaCrMpa - thick) / thick < 1e-9)
+})
+
+test("uniform σy on a 2:1 plate matches the swapped classical width", () => {
+  const alpha = 0.5
+  const theory = independentUniform(alpha)
+  const sigma = independentStress(theory.k, 210000, 0.3, 10, 2000)
+  assert.equal(theory.m, 1)
+  assert.ok(Math.abs(theory.k - 6.25) < 1e-12)
+  assert.ok(Math.abs(sigma - 29.6562632244) < 1e-6, String(sigma))
+  const fem = solvePlateFem({
+    aMm: 2000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 0, sigmaYMpa: 1, psi: 1, tauMpa: 0,
+    nx: 16, ny: 12, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  const got = fem.modes[0]?.sigmaYCrMpa ?? 0
+  assert.ok(Math.abs(got - sigma) / sigma < 0.01, String(got))
+  assert.equal(fem.modes[0]?.sigma1CrMpa, null)
+})
+
+test("a stiffener on the boundary is not assembled", () => {
+  const input = { aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 8, ny: 8, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false }
+  const bare = solvePlateFem(input)
+  const edge = solvePlateFem({ ...input, stiffeners: [{ id: "E", axis: "x", atMm: 0, eiNmm2: 1e11, gjNmm2: 1e8, areaMm2: 800, rigid: false }] })
+  assert.equal(edge.ok, true, edge.reason)
+  assert.ok(Math.abs((edge.modes[0]?.sigma1CrMpa ?? 0) - (bare.modes[0]?.sigma1CrMpa ?? 0)) < 1e-6)
+  assert.match(edge.stiffenerNotes.join(" "), /not added/i)
+})
+
+test("a real stiffener raises the eigenvalue and a weak one does not jump", () => {
+  const bare = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+    nx: 8, ny: 8, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+  })
+  const strong = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+    nx: 8, ny: 8, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    stiffeners: [{ id: "S", axis: "x", atMm: 500, eiNmm2: 210000 * 2.05e6, gjNmm2: 8e7, areaMm2: 800, rigid: false }],
+  })
+  const weak = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+    nx: 8, ny: 8, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    stiffeners: [{ id: "W", axis: "x", atMm: 500, eiNmm2: 2.1e6, gjNmm2: 1e4, areaMm2: 20, rigid: false }],
+  })
+  const b = bare.modes[0]?.sigma1CrMpa ?? 0
+  const s = strong.modes[0]?.sigma1CrMpa ?? 0
+  const w = weak.modes[0]?.sigma1CrMpa ?? 0
+  assert.ok(s > b * 2, `strong ${s} bare ${b}`)
+  assert.ok(w > b * 0.7 && w < b * 1.4, `weak ${w} bare ${b}`)
+})
+
+test("stiffener eigenvalue follows EI and a weak bar is not a rigid line", () => {
+  const run = (ei: number) => solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+    nx: 6, ny: 6, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    stiffeners: [{ id: "S", axis: "x", atMm: 500, eiNmm2: ei, gjNmm2: ei / 50, areaMm2: 40, rigid: false }],
+  })
+  const bare = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+    nx: 6, ny: 6, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+  })
+  const levels = [1e4, 1e6, 1e8, 1e10, 1e12]
+  const values = levels.map((ei) => {
+    const result = run(ei)
+    assert.equal(result.ok, true, result.reason)
+    assert.match(result.stiffenerNotes.join(" "), /mesh line/)
+    return result.modes[0]?.sigma1CrMpa ?? 0
+  })
+  const b = bare.modes[0]?.sigma1CrMpa ?? 0
+  assert.ok(values[0]! > b * 0.85 && values[0]! < b * 1.2, `very low ${values[0]} bare ${b}`)
+  assert.ok(values[4]! > values[0]! * 1.4, `very high ${values[4]} very low ${values[0]}`)
+  assert.ok(values[1]! < values[4]! * 0.85, `low EI ${values[1]} must not already be the very high result ${values[4]}`)
+  for (let i = 1; i < values.length; i++) assert.ok(values[i]! >= values[i - 1]! * 0.98, values.join(","))
+})
+
+test("thinner square plate moves toward the Kirchhoff k = 4 stress", () => {
+  const gap = (tMm: number) => {
+    const fem = solvePlateFem({
+      aMm: 1000, bMm: 1000, tMm, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+      nx: 12, ny: 12, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    })
+    assert.equal(fem.ok, true, fem.reason)
+    const theory = independentStress(4, 210000, 0.3, tMm, 1000)
+    const got = fem.modes[0]?.sigma1CrMpa ?? 0
+    return Math.abs(got - theory) / theory
+  }
+  const thick = gap(20)
+  const thin = gap(2)
+  assert.ok(thin < thick, `b/t 500 gap ${thin} should be under b/t 50 gap ${thick}`)
+  assert.ok(thick > 0.005, `thick-plate gap ${thick} should show transverse shear, not be forced to zero`)
+})
+
+test("a near-zero stiffener does not move the plate", () => {
+  const bare = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+    nx: 6, ny: 6, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+  })
+  const tiny = solvePlateFem({
+    ...{
+      aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 1, psi: 1, tauMpa: 0,
+      nx: 6, ny: 6, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    },
+    stiffeners: [{ id: "Z", axis: "x", atMm: 500, eiNmm2: 1, gjNmm2: 0, areaMm2: 0, rigid: false }],
+  })
+  assert.equal(bare.ok && tiny.ok, true)
+  const a = bare.modes[0]?.sigma1CrMpa ?? 0
+  const b = tiny.modes[0]?.sigma1CrMpa ?? 0
+  assert.ok(Math.abs(a - b) / a < 0.005, `${a} vs ${b}`)
+})
+
+test("reversing shear does not change the square-plate eigenvalue", () => {
+  const run = (tauMpa: number) => solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 0, psi: 1, tauMpa,
+    nx: 6, ny: 6, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+  })
+  const plus = run(1)
+  const minus = run(-1)
+  assert.equal(plus.ok && minus.ok, true)
+  const a = Math.abs(plus.modes[0]?.lambda ?? 0)
+  const b = Math.abs(minus.modes[0]?.lambda ?? 0)
+  assert.ok(Math.abs(a - b) / a < 1e-6, `${a} vs ${b}`)
+})
+
+test("patch reactions balance the applied force", () => {
+  const fem = solvePlateFem({
+    aMm: 1000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, sigma1Mpa: 0, psi: 1, tauMpa: 0,
+    nx: 6, ny: 6, edges: SS, krNPerRadPerMm: 0, modes: 1, shapes: false,
+    patchLoad: { edge: "y1", atMm: 500, lengthMm: 400, forceN: 5000 },
+  })
+  assert.equal(fem.ok, true, fem.reason)
+  assert.match(fem.prestressNote, /Applied Fx/)
+  assert.match(fem.prestressNote, /Reaction Fy/)
+  assert.match(fem.prestressNote, /Force imbalance 0\.0000%/)
+})
+
+
+========================================================================
+FILE src/plate/mac.ts
+========================================================================
+
+/** Modal assurance on out-of-plane w. Sign is irrelevant. Not a design check. */
+
+function bilinear(w: number[], xs: number[], ys: number[], x: number, y: number): number {
+  const nx = xs.length
+  const ny = ys.length
+  if (nx < 2 || ny < 2 || w.length !== nx * ny) return 0
+  let ix = 0
+  while (ix < nx - 2 && xs[ix + 1]! < x) ix += 1
+  let iy = 0
+  while (iy < ny - 2 && ys[iy + 1]! < y) iy += 1
+  const x0 = xs[ix]!
+  const x1 = xs[ix + 1]!
+  const y0 = ys[iy]!
+  const y1 = ys[iy + 1]!
+  const tx = x1 === x0 ? 0 : (x - x0) / (x1 - x0)
+  const ty = y1 === y0 ? 0 : (y - y0) / (y1 - y0)
+  const w00 = w[iy * nx + ix] ?? 0
+  const w10 = w[iy * nx + ix + 1] ?? 0
+  const w01 = w[(iy + 1) * nx + ix] ?? 0
+  const w11 = w[(iy + 1) * nx + ix + 1] ?? 0
+  const a = w00 * (1 - tx) + w10 * tx
+  const b = w01 * (1 - tx) + w11 * tx
+  return a * (1 - ty) + b * ty
+}
+
+function sample(w: number[], xs: number[], ys: number[], n: number): Float64Array {
+  const out = new Float64Array(n * n)
+  const a = xs[xs.length - 1] ?? 1
+  const b = ys[ys.length - 1] ?? 1
+  for (let j = 0; j < n; j++) {
+    const y = (b * j) / Math.max(1, n - 1)
+    for (let i = 0; i < n; i++) {
+      const x = (a * i) / Math.max(1, n - 1)
+      out[j * n + i] = bilinear(w, xs, ys, x, y)
+    }
+  }
+  return out
+}
+
+/** (φᵢ·φⱼ)² / (‖φᵢ‖² ‖φⱼ‖²) after both modes are sampled on the same grid. */
+export function modeMac(
+  wA: number[],
+  xsA: number[],
+  ysA: number[],
+  wB: number[],
+  xsB: number[],
+  ysB: number[],
+  grid = 21,
+): number {
+  const a = sample(wA, xsA, ysA, grid)
+  const b = sample(wB, xsB, ysB, grid)
+  let ab = 0
+  let aa = 0
+  let bb = 0
+  for (let i = 0; i < a.length; i++) {
+    ab += a[i]! * b[i]!
+    aa += a[i]! * a[i]!
+    bb += b[i]! * b[i]!
+  }
+  if (!(aa > 0 && bb > 0)) return 0
+  return (ab * ab) / (aa * bb)
+}
+
+
+========================================================================
+FILE src/plate/model.test.ts
+========================================================================
+
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { as4100PlateChecks } from "./codes/as4100.ts"
+import { plateGirderWeb } from "./girder.ts"
+import { solvePlateFem } from "./fem.ts"
+import { stiffenerProps } from "./stiffeners.ts"
+import { buildPanels, classifyMode } from "./subpanels.ts"
+
+const SS = { x0: "ss" as const, x1: "ss" as const, y0: "ss" as const, y1: "ss" as const }
+
+test("flat bar second moment is about the plate mid-surface", () => {
+  const props = stiffenerProps({
+    id: "S1", axis: "x", atMm: 500, kind: "flat", hMm: 80, twMm: 10, bfMm: 0, tfMm: 0,
+    eMpa: 210000, fyMpa: 350, rigid: false,
+  }, 10)
+  assert.equal(props.areaMm2, 800)
+  assert.equal(props.centroidFromFaceMm, 40)
+  assert.ok(Math.abs(props.iMm4 - 2.0466667e6) < 2)
+  assert.ok(props.eiNmm2 === 210000 * props.iMm4)
+})
+
+test("one longitudinal stiffener makes two panels that are not closed form", () => {
+  const panels = buildPanels({
+    aMm: 2000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3, fyMpa: 350, fuMpa: 480,
+    sigma1Mpa: 100, psi: 1, tauMpa: 0, edges: SS,
+    stiffeners: [{ id: "S1", axis: "x", atMm: 400, kind: "flat", hMm: 80, twMm: 10, bfMm: 0, tfMm: 0, eMpa: 210000, fyMpa: 350, rigid: false }],
+  })
+  assert.equal(panels.length, 2)
+  assert.equal(panels[0]?.id, "P1")
+  assert.equal(panels.every((panel) => panel.closedForm), false)
+  assert.match(panels[0]?.status ?? "", /STIFFENER ADEQUACY NOT YET VERIFIED/)
+})
+
+test("symmetric girder web bending gives ψ near −1", () => {
+  const girder = plateGirderWeb({
+    hwMm: 1200, twMm: 10, bfTopMm: 300, tfTopMm: 20, bfBotMm: 300, tfBotMm: 20,
+    momentNmm: 800e6, shearN: 400e3,
+  })
+  assert.equal(girder.ok, true)
+  assert.ok(girder.psi != null && Math.abs(girder.psi + 1) < 1e-6)
+  assert.ok((girder.sigmaTopMpa ?? 0) > 0)
+  assert.ok((girder.sigmaBottomMpa ?? 0) < 0)
+})
+
+test("AS 4100 does not take the panel width as code b", () => {
+  const rows = as4100PlateChecks({ aMm: 2000, bMm: 1000, tMm: 10, fyMpa: 350, edgesSimplySupported: true, stiffenerCount: 0 })
+  const slenderness = rows.find((row) => row.id === "slenderness")
+  const fence = rows.find((row) => row.id === "dimension-fence")
+  assert.equal(slenderness?.status, "not-checked")
+  assert.equal(slenderness?.result, "NOT CHECKED")
+  assert.equal(fence?.result, "NOT USED")
+  assert.ok(!/λe,b/.test(slenderness?.result ?? ""))
+})
+
+test("α = 2 eigenmode has two half-waves, not one invented sine", () => {
+  const fem = solvePlateFem({
+    aMm: 2000, bMm: 1000, tMm: 10, eMpa: 210000, nu: 0.3,
+    sigma1Mpa: 1, psi: 1, tauMpa: 0, nx: 16, ny: 8, edges: SS, krNPerRadPerMm: 0, modes: 1,
+  })
+  const w = fem.modes[0]?.w ?? []
+  const iy = Math.round((fem.ys.length - 1) / 2)
+  const line = fem.xs.map((_, ix) => w[iy * fem.xs.length + ix] ?? 0)
+  let changes = 0
+  let prev = 0
+  for (const value of line) {
+    if (Math.abs(value) < 1e-6) continue
+    const sign = Math.sign(value)
+    if (prev !== 0 && prev * sign < 0) changes += 1
+    prev = sign
+  }
+  assert.equal(changes, 1)
+  assert.equal(classifyMode(w, fem.xs, fem.ys, [{ id: "P1", col: 0, row: 0, x0: 0, x1: 2000, y0: 0, y1: 1000, aMm: 2000, bMm: 1000, alpha: 2, sigmaBottom: 1, sigmaTop: 1, psi: 1, tau: 0, closedForm: true, sigmaCrMpa: 1, kSigma: 4, m: 2, n: 1, ssEstimateMpa: 1, status: "" }]).kind, "UNSTIFFENED PANEL")
+})
