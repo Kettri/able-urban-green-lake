@@ -142,6 +142,15 @@ function authPopupPlugin(): Plugin {
   };
 }
 
+// Vercel (Grok publish) does not emit `.output/server/index.mjs`.
+// Railway's start command runs that file, so the Railway build must use the
+// Node server preset. An explicit NITRO_PRESET still wins.
+function nitroPreset(): "vercel" | "node-server" {
+  const explicit = process.env.NITRO_PRESET;
+  if (explicit === "node-server" || explicit === "vercel") return explicit;
+  if (process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID) return "node-server";
+  return "vercel";
+}
 // `0.0.0.0:8080` is the live-preview contract — don't change host/port.
 // The dev server starts once `src/router.tsx` and `src/routes/` exist — see
 // AGENTS.md § "First scaffold".
@@ -170,7 +179,7 @@ export default defineConfig(({ command, isPreview }) => ({
     ...(command === "build" || isPreview
       ? [
           nitro({
-            preset: "vercel",
+            preset: nitroPreset(),
             // Auto-registers server/middleware/* (the PWA install page +
             // manifest + head-tag middleware). Nitro v3 defaults serverDir to
             // false, so removing this silently unwires /?install=1 on deploys.
