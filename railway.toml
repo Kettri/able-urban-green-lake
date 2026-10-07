@@ -1,12 +1,10 @@
-# Railway was crashing with:
-#   Error: Cannot find module '/app/.output/server/index.mjs'
-# The Vercel Nitro preset does not write that file. On Railway, vite.config.ts
-# switches to the node-server preset, and this start command runs it.
+# The previous image started node .output/server/index.mjs without building it.
+# A Dockerfile build fails unless that file exists.
 [build]
-buildCommand = "npm run build"
+builder = "DOCKERFILE"
 
 [deploy]
-startCommand = "HOST=0.0.0.0 node .output/server/index.mjs"
+startCommand = "node .output/server/index.mjs"
 healthcheckPath = "/"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"

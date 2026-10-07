@@ -1,0 +1,9 @@
+node_modules
+.output
+.git
+screenshots
+artifacts
+attachments
+public/review
+public/*.zip
+*.pdf
